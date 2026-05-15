@@ -37,7 +37,13 @@ def _make_completion(idx: int) -> CompletionAudio:
     )
 
 
-def _make_output(idx: int, num_completions: int = 2) -> AutoRegressiveTTSAgentLoopOutput:
+def _make_output(
+    idx: int,
+    num_completions: int = 2,
+    *,
+    cer_values: list[float] | None = None,
+    target_duration: float = 0.0,
+) -> AutoRegressiveTTSAgentLoopOutput:
     from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 
     metrics = AgentLoopMetrics(
@@ -46,6 +52,14 @@ def _make_output(idx: int, num_completions: int = 2) -> AutoRegressiveTTSAgentLo
         compute_score=0.0,
         num_preempted=0,
     )
+    extra: dict = {"ref_audio": None, "target_audio": None, "target_duration": target_duration}
+    if cer_values is not None:
+        extra["reward_extra_info"] = {
+            "per_sample_rewards": [0.5] * num_completions,
+            "per_sample_success": [True] * num_completions,
+            "per_sample_transcripts": [""] * num_completions,
+            "per_sample_cers": cer_values,
+        }
     return AutoRegressiveTTSAgentLoopOutput(
         prompt_ids=[0],
         prompt_text=f"text-{idx}",
@@ -54,7 +68,7 @@ def _make_output(idx: int, num_completions: int = 2) -> AutoRegressiveTTSAgentLo
         reward_score=0.5,
         num_turns=2,
         metrics=metrics,
-        extra_fields={"ref_audio": None, "target_audio": None},
+        extra_fields=extra,
     )
 
 
@@ -72,7 +86,10 @@ def test_emit_validation_artifacts_writes_step_dir(tmp_path: Path) -> None:
     worker._validation_output_dir = tmp_path
     worker._validation_step_counter = 0
 
-    outputs = [_make_output(i) for i in range(3)]
+    outputs = [
+        _make_output(i, cer_values=[0.05 + 0.1 * i, 0.1 + 0.1 * i], target_duration=1.0)
+        for i in range(3)
+    ]
     worker._emit_validation_artifacts(outputs)
 
     step_dirs = sorted(tmp_path.glob("validation_step_*"))
@@ -89,6 +106,18 @@ def test_emit_validation_artifacts_writes_step_dir(tmp_path: Path) -> None:
         assert key in metrics, f"AC-6 metric {key!r} missing from validation metrics.json"
     # mean_reward is always populated for non-empty outputs.
     assert metrics["mean_reward"] is not None
+    # mean_cer must be a finite number when per-sample CERs are present
+    # (Codex round-5 explicit complaint that this was previously null).
+    assert metrics["mean_cer"] is not None
+    assert isinstance(metrics["mean_cer"], float)
+    import math as _math
+
+    assert _math.isfinite(metrics["mean_cer"])
+    # mean_duration_ratio is populated when target_duration > 0 and the
+    # completion carries a non-empty waveform (our fixture uses 24000 samples
+    # at sr=24000 → 1.0s, vs target_duration=1.0 → ratio=1.0).
+    assert metrics["mean_duration_ratio"] is not None
+    assert _math.isfinite(metrics["mean_duration_ratio"])
     # policy_loss / kl_loss are null at validation steps (no training update).
     assert metrics["policy_loss"] is None
     assert metrics["kl_loss"] is None

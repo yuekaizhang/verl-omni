@@ -107,14 +107,21 @@ async def _run(args: argparse.Namespace) -> int:
         enforce_eager=True,
     )
 
-    extra_args = {
-        "text": args.prompt_text,
+    # The Qwen3-TTS talker reads ``task_type``, ``ref_audio``, ``ref_text``
+    # from ``info_dict`` (which is sourced from the prompt's
+    # ``additional_information`` field). ``task_type`` is indexed as
+    # ``info_dict.get("task_type")[0]`` so we pass it as a one-element list.
+    additional_information = {
         "ref_audio": args.ref_audio,
-        "ref_text": args.ref_text,
-        "task_type": "Base",
+        "ref_text": [args.ref_text],
+        "task_type": ["Base"],
     }
-    prompt: OmniCustomPrompt = {"extra_args": extra_args}
+    prompt = {"prompt": args.prompt_text, "additional_information": additional_information}
     sampling = SamplingParams(temperature=0.9, top_k=50, max_tokens=512, logprobs=1, stop_token_ids=[2150])
+    # Stage 1 (code2wav) is a deterministic generator; vllm-omni's
+    # orchestrator clones the params to build an engine-core request, so a
+    # plain SamplingParams works as a passthrough.
+    stage1_params = SamplingParams(temperature=0.0, max_tokens=65536, detokenize=True)
 
     saw_codec_tokens = False
     saw_logprobs = False
@@ -123,7 +130,7 @@ async def _run(args: argparse.Namespace) -> int:
     waveform_samples = 0
 
     try:
-        async for omni_out in engine.generate(prompt=prompt, request_id="smoke-1", sampling_params_list=[sampling, None]):
+        async for omni_out in engine.generate(prompt=prompt, request_id="smoke-1", sampling_params_list=[sampling, stage1_params]):
             stage_id = getattr(omni_out, "stage_id", None)
             print(f"[T1] yielded stage_id={stage_id} finished={getattr(omni_out, 'finished', '?')}")
             if stage_id == 0 and omni_out.request_output is not None:

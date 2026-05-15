@@ -439,13 +439,22 @@ class AutoRegressiveTTSAgentLoopWorker:
             scores: list[float] = []
             successes: list[bool] = []
             transcripts: list[str] = []
+            cers: list[float] = []
+            duration_penalties: list[float] = []
             for completion in output.completions:
+                # Wrap the waveform via np.empty+assign so DataProto keeps the
+                # underlying ndarray rather than collapsing it into a 2-D
+                # object array (BL-20260515-dataproto-object-batch-wrap).
+                waveform_arr = np.empty(1, dtype=object)
+                waveform_arr[0] = completion.waveform
+                codec_arr = np.empty(1, dtype=object)
+                codec_arr[0] = list(completion.codec_tokens)
                 non_tensor_batch = {
-                    "waveform": np.array([completion.waveform], dtype=object),
+                    "waveform": waveform_arr,
                     "sample_rate": np.array([output.sample_rate]),
                     "prompt_text": np.array([output.prompt_text]),
                     "target_duration": np.array([output.extra_fields.get("target_duration", 0.0)]),
-                    "codec_tokens": np.array([list(completion.codec_tokens)], dtype=object),
+                    "codec_tokens": codec_arr,
                     "data_source": np.array([output.extra_fields.get("data_source", "qwen3_tts")]),
                 }
                 data = DataProto(non_tensor_batch=non_tensor_batch)
@@ -455,6 +464,14 @@ class AutoRegressiveTTSAgentLoopWorker:
                 info = result.get("reward_extra_info", {})
                 successes.append(bool(info.get("success", True)))
                 transcripts.append(str(info.get("transcript", "")))
+                # Preserve the reward-manager breakdown so validation logging
+                # can emit per-step mean_cer / mean_duration_penalty etc.
+                cer_value = info.get("cer")
+                if isinstance(cer_value, (int, float)) and math.isfinite(cer_value):
+                    cers.append(float(cer_value))
+                dp_value = info.get("duration_penalty")
+                if isinstance(dp_value, (int, float)) and math.isfinite(dp_value):
+                    duration_penalties.append(float(dp_value))
 
             # GRPO-mean over successful samples; failed (NaN) samples are excluded.
             finite = [s for s, ok in zip(scores, successes) if ok and math.isfinite(s)]
@@ -466,6 +483,8 @@ class AutoRegressiveTTSAgentLoopWorker:
                 "per_sample_rewards": scores,
                 "per_sample_success": successes,
                 "per_sample_transcripts": transcripts,
+                "per_sample_cers": cers,
+                "per_sample_duration_penalties": duration_penalties,
             }
         output.metrics.compute_score = timing.get("compute_score", 0.0)
 
