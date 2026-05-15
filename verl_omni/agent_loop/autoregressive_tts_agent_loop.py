@@ -43,6 +43,7 @@ import logging
 import math
 import os
 import random
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -252,6 +253,29 @@ class AutoRegressiveTTSAgentLoopWorker:
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
+        # Validation artifact logger: AC-8 requires generated/ref/(target) wavs
+        # plus metrics.json per validation step. The trainer wires this into
+        # the worker's runtime path; the per-step write happens inside
+        # generate_sequences when batch.meta_info["validate"] is True.
+        from verl_omni.utils.validation_audio_logger import (
+            log_validation_step,
+            post_run_check_emitted_artifacts,
+        )
+
+        self._log_validation_step = log_validation_step
+        self._post_run_check_emitted_artifacts = post_run_check_emitted_artifacts
+        validation_dir = getattr(
+            getattr(config.trainer, "validation_data_dir", None),
+            "__fspath__",
+            None,
+        )
+        self._validation_output_dir = (
+            Path(config.trainer.validation_data_dir)
+            if getattr(config.trainer, "validation_data_dir", None)
+            else Path(config.trainer.default_local_dir) / "validation_audio"
+        ) if hasattr(config, "trainer") else None
+        self._validation_step_counter = 0
+
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -261,6 +285,7 @@ class AutoRegressiveTTSAgentLoopWorker:
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         sampling_params = self._build_sampling_params(batch)
+        is_validate = bool(batch.meta_info.get("validate", False))
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = self.config.actor_rollout_ref.rollout.agent.default_agent_loop
@@ -272,7 +297,56 @@ class AutoRegressiveTTSAgentLoopWorker:
             tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
+        if is_validate and self._validation_output_dir is not None:
+            self._emit_validation_artifacts(outputs)
+
         return self._postprocess(outputs)
+
+    def _emit_validation_artifacts(
+        self,
+        outputs: list["AutoRegressiveTTSAgentLoopOutput"],
+    ) -> None:
+        """Persist AC-8 audio artifacts for one validation step."""
+
+        samples: list[dict[str, Any]] = []
+        for output in outputs:
+            for completion in output.completions:
+                samples.append(
+                    {
+                        "waveform": completion.waveform,
+                        "sample_rate": output.sample_rate,
+                        "ref_audio": output.extra_fields.get("ref_audio"),
+                        "target_audio": output.extra_fields.get("target_audio"),
+                    }
+                )
+        if not samples:
+            return
+
+        step_metrics: dict[str, Any] = {}
+        rewards = [o.reward_score for o in outputs if o.reward_score is not None]
+        if rewards:
+            step_metrics["mean_reward"] = float(sum(rewards) / len(rewards))
+        cers: list[float] = []
+        for o in outputs:
+            info = o.extra_fields.get("reward_extra_info") if isinstance(o.extra_fields, dict) else None
+            if isinstance(info, dict):
+                per = info.get("per_sample_rewards", [])
+                cers.extend(float(x) for x in per if isinstance(x, (int, float)) and math.isfinite(x))
+        if cers:
+            step_metrics["mean_reward_per_sample"] = float(sum(cers) / len(cers))
+
+        self._validation_step_counter += 1
+        try:
+            self._log_validation_step(
+                out_dir=self._validation_output_dir,
+                step=self._validation_step_counter,
+                samples=samples,
+                scalar_metrics=step_metrics,
+                num_samples=min(4, len(samples)),
+            )
+        except Exception as exc:  # pragma: no cover - logged for the operator
+            logger.warning("Validation audio logging failed at step %s: %s", self._validation_step_counter, exc)
+            raise
 
     def _build_sampling_params(self, batch: DataProto) -> dict[str, Any]:
         rollout = self.config.actor_rollout_ref.rollout

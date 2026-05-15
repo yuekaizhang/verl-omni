@@ -1,3 +1,4 @@
+# @package _global_
 # Qwen3-TTS GRPO recipe (verl-omni)
 #
 # Inherits the diffusion recipe's full config defaults (FSDP actor, ref
@@ -18,19 +19,24 @@
 
 defaults:
 
-  - diffusion/model_engine: dp_diffusion
+  # Use absolute (`/`-prefixed) paths so groups resolve against the config
+  # search root (``verl_omni/trainer/config/``), not against this file's
+  # subdirectory (``qwen3_tts/``). The canonical recipe layout per AC-9
+  # keeps the trainer yaml in its own subdir.
 
-  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+  - /diffusion/model_engine: dp_diffusion
 
-  - data@data: legacy_data
+  - /diffusion/actor@actor_rollout_ref.actor: dp_diffusion_actor
 
-  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+  - /data@data: legacy_data
 
-  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
+  - /diffusion/ref@actor_rollout_ref.ref: dp_diffusion_ref
 
-  - diffusion/model@actor_rollout_ref.model: diffusion_model
+  - /diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
 
-  - reward@reward: reward
+  - /diffusion/model@actor_rollout_ref.model: diffusion_model
+
+  - /reward@reward: reward
 
   - _self_
 

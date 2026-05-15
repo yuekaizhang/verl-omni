@@ -48,7 +48,7 @@ def _compose(extra_overrides: list[str] | None = None) -> DictConfig:
     if extra_overrides:
         overrides.extend(extra_overrides)
     with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
-        return compose(config_name="qwen3_tts_trainer", overrides=overrides)
+        return compose(config_name="qwen3_tts/qwen3_tts_trainer", overrides=overrides)
 
 
 def test_compose_succeeds_and_top_level_keys_are_correct() -> None:
@@ -97,7 +97,7 @@ def test_composed_config_rejects_missing_asr_url() -> None:
     ]
     with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
         with pytest.raises(Exception):  # MissingMandatoryValue from OmegaConf at access time
-            cfg = compose(config_name="qwen3_tts_trainer", overrides=overrides)
+            cfg = compose(config_name="qwen3_tts/qwen3_tts_trainer", overrides=overrides)
             validate_qwen3_tts_recipe_config(cfg)
 
 

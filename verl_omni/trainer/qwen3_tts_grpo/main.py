@@ -29,7 +29,7 @@ from .launcher import validate_qwen3_tts_recipe_config
 
 @hydra.main(
     config_path="../config",
-    config_name="qwen3_tts_trainer",
+    config_name="qwen3_tts/qwen3_tts_trainer",
     version_base=None,
 )
 def main(config: DictConfig) -> None:
@@ -40,6 +40,9 @@ def main(config: DictConfig) -> None:
     diffusion sub-configs (``diffusion/actor/...``, ``diffusion/rollout/...``,
     etc.) — the AR-TTS recipe inherits those and overrides only the fields
     that need to change.
+
+    The canonical recipe layout (per AC-9) is
+    ``verl_omni/trainer/config/qwen3_tts/qwen3_tts_trainer.yaml``.
     """
 
     validate_qwen3_tts_recipe_config(config)
