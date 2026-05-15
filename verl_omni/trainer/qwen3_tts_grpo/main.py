@@ -21,10 +21,39 @@ fail-fast validator. Launch via::
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import hydra
 from omegaconf import DictConfig
 
+from verl_omni.utils.validation_audio_logger import (
+    ArtifactWriteError,
+    post_run_check_emitted_artifacts,
+)
+
 from .launcher import validate_qwen3_tts_recipe_config
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_validation_dir(config: DictConfig) -> Path | None:
+    """Derive the per-step validation artifact dir the worker writes to.
+
+    Mirrors the resolution in :class:`AutoRegressiveTTSAgentLoopWorker.__init__`
+    so the post-run AC-8 check inspects the same location the worker used.
+    """
+
+    trainer = getattr(config, "trainer", None)
+    if trainer is None:
+        return None
+    explicit = getattr(trainer, "validation_data_dir", None)
+    if explicit:
+        return Path(str(explicit))
+    default_local = getattr(trainer, "default_local_dir", None)
+    if not default_local:
+        return None
+    return Path(str(default_local)) / "validation_audio"
 
 
 @hydra.main(
@@ -48,7 +77,24 @@ def main(config: DictConfig) -> None:
     validate_qwen3_tts_recipe_config(config)
     from verl.trainer.main_ppo import run_ppo
 
-    run_ppo(config)
+    try:
+        run_ppo(config)
+    finally:
+        # AC-8 post-run fail-closed check: if any validation step ran, make sure
+        # at least one generated audio artifact landed. A run that emitted zero
+        # artifacts is flagged here rather than silently passing.
+        validation_dir = _resolve_validation_dir(config)
+        if validation_dir is not None and validation_dir.exists():
+            try:
+                steps = post_run_check_emitted_artifacts(validation_dir)
+                logger.info(
+                    "Post-run AC-8 check: %d validation step(s) emitted audio artifacts at %s",
+                    len(steps),
+                    validation_dir,
+                )
+            except ArtifactWriteError:
+                logger.error("Post-run AC-8 check failed for %s", validation_dir)
+                raise
 
 
 if __name__ == "__main__":

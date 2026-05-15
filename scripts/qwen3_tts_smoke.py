@@ -36,11 +36,18 @@ import numpy as np
 
 
 def _check_speaker_encoder(model_path: str) -> bool:
-    """Inspect the talker checkpoint for `speaker_encoder` weights."""
+    """Inspect the talker checkpoint for ``speaker_encoder`` weights.
+
+    Fail-closed: returns False when the safetensors file cannot be opened
+    or no ``speaker_encoder.*`` keys are present. A Hub ID that has not
+    been downloaded locally counts as "not verifiable" and is rejected;
+    the caller is expected to download the checkpoint first (via
+    ``huggingface-cli download`` or similar).
+    """
 
     import safetensors.torch as st
 
-    weights_file = None
+    weights_file: Path | None = None
     for candidate in (
         Path(model_path) / "model.safetensors",
         Path(model_path) / "talker" / "model.safetensors",
@@ -49,23 +56,27 @@ def _check_speaker_encoder(model_path: str) -> bool:
             weights_file = candidate
             break
     if weights_file is None:
-        # Try HF download cache via huggingface_hub.
-        try:
-            from huggingface_hub import HfApi
-
-            api = HfApi()
-            info = api.model_info(model_path)
-            files = [f.rfilename for f in (info.siblings or [])]
-            if not any("speaker_encoder" in f for f in files):
-                # Not in file names, but weights inside model.safetensors are more likely.
-                return True  # cannot verify without download; defer to load
-        except Exception:
-            return True
-    if weights_file is not None:
+        print(
+            f"[T1] FAIL-CLOSED: cannot find model.safetensors under {model_path!r}. "
+            "Provide a local checkpoint directory or run `huggingface-cli download "
+            "{model_path}` first; we will not assume speaker_encoder is present.",
+            file=sys.stderr,
+        )
+        return False
+    try:
         with st.safe_open(str(weights_file), framework="pt") as f:
             keys = list(f.keys())
-        return any("speaker_encoder" in k for k in keys)
-    return False
+    except Exception as exc:
+        print(f"[T1] FAIL-CLOSED: unable to read {weights_file}: {exc}", file=sys.stderr)
+        return False
+    has_speaker_encoder = any("speaker_encoder" in k for k in keys)
+    if not has_speaker_encoder:
+        print(
+            f"[T1] FAIL-CLOSED: {weights_file} has no speaker_encoder.* keys "
+            "(out of {len(keys)} total). Voice cloning would not work.",
+            file=sys.stderr,
+        )
+    return has_speaker_encoder
 
 
 async def _run(args: argparse.Namespace) -> int:

@@ -1,0 +1,28 @@
+# AR-TTS reward overrides for the Qwen3-TTS GRPO recipe.
+#
+# Composed into ``reward`` by the parent trainer yaml's ``defaults:`` entry::
+#
+#     - /qwen3_tts/reward@reward: qwen3_tts_reward
+#
+# The diffusion-side reward base (``/reward: reward``) is loaded first; the
+# values below layer on top.
+
+# Swap the default VisualRewardManager for the AR-TTS ASR-based one.
+reward_manager:
+  _target_: verl.workers.config.reward_model.RewardManagerConfig
+  source: importlib
+  name: AsrErrorRateRewardManager
+  module:
+    _target_: verl.trainer.config.config.ModuleConfig
+    path: pkg://verl_omni.reward_loop.reward_manager
+
+# Remote Qwen3-ASR HTTP endpoint. ``base_url`` MUST be set at launch:
+#   reward.reward_model.base_url=http://<asr-host>:<port>
+reward_model:
+  base_url: ???
+  model: qwen3-asr
+  timeout_s: 60.0
+  language: zh
+  co_located: false
+  metric: cer
+  chinese_tokenization: null

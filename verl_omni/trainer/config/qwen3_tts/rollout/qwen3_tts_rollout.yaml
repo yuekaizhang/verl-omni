@@ -1,0 +1,40 @@
+# AR-TTS rollout overrides for the Qwen3-TTS GRPO recipe.
+#
+# Composed into ``actor_rollout_ref.rollout`` by the parent trainer yaml's
+# ``defaults:`` entry::
+#
+#     - /qwen3_tts/rollout@actor_rollout_ref.rollout: qwen3_tts_rollout
+#
+# The diffusion-side rollout base (``/diffusion/rollout: diffusion_rollout``)
+# is loaded first; the values below layer on top. Keep this file fragment
+# minimal — only fields that differ from the diffusion base.
+
+# Use the verl-omni-side TTS rollout replica registered in
+# verl_omni/workers/rollout/replica.py (which also triggers the
+# LLMServerManager.get_client monkey-patch that returns the AR-TTS client).
+name: vllm_omni_tts
+
+# Group sampling for GRPO. Codec-token rollouts at n>=2 form one group.
+n: 4
+
+# AR sampling knobs forwarded into vllm.SamplingParams by generate_tts.
+temperature: 0.9
+top_p: 1.0
+top_k: 50
+max_tokens: 4096
+repetition_penalty: 1.05
+logprobs: 1
+stop_token_ids: [2150]
+prompt_length: 64
+response_length: 4096
+
+val_kwargs:
+  temperature: 0.0
+  seed: 42
+
+agent:
+  # The AR-TTS AgentLoop registered via @register decorator.
+  default_agent_loop: autoregressive_tts_single_turn_agent
+  # The verl-omni-side AgentLoopManager subclass that injects our worker.
+  agent_loop_manager_class: verl_omni.agent_loop.autoregressive_tts_agent_loop.AutoRegressiveTTSAgentLoopManager
+  agent_loop_config_path: null

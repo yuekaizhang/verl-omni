@@ -1,0 +1,16 @@
+# AR-TTS reference-policy overrides for the Qwen3-TTS GRPO recipe.
+#
+# Composed into ``actor_rollout_ref.ref`` by the parent trainer yaml's
+# ``defaults:`` entry::
+#
+#     - /qwen3_tts/ref@actor_rollout_ref.ref: qwen3_tts_ref
+#
+# The diffusion ref base (``/diffusion/ref: dp_diffusion_ref``) is loaded
+# first; the values below layer on top.
+#
+# v1 disables the reference module by default — kl_coef=0 in the top-level
+# algorithm config makes the KL term inert. This file is kept so the
+# canonical per-role packaging layout is complete and future rounds can
+# wire in a frozen reference policy without further config plumbing.
+
+enable: false

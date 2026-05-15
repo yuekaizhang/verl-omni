@@ -56,7 +56,12 @@ verl_omni/
 ├── utils/
 │   ├── dataset/qwen3_tts_dataset.py
 │   └── reward_score/asr_error_rate.py
-├── trainer/config/qwen3_tts_trainer.yaml
+├── trainer/config/qwen3_tts/                 # AC-9 packaging layout
+│   ├── qwen3_tts_trainer.yaml
+│   ├── actor/qwen3_tts_actor.yaml
+│   ├── ref/qwen3_tts_ref.yaml
+│   ├── rollout/qwen3_tts_rollout.yaml
+│   └── reward/qwen3_tts_reward.yaml
 └── trainer/qwen3_tts_grpo/
     ├── launcher.py                            # validate_qwen3_tts_recipe_config
     ├── main.py                                # Hydra entry point (wraps verl.trainer.main_ppo)

@@ -46,7 +46,12 @@ verl_omni/
 ├── reward_loop/reward_manager/asr_error_rate.py                # AsrErrorRateRewardManager (HTTP-only)
 ├── utils/dataset/qwen3_tts_dataset.py                          # Qwen3TTSDataset
 ├── utils/reward_score/asr_error_rate.py                        # CER / WER / reward formula
-├── trainer/config/qwen3_tts/*.yaml                             # Hydra config tree
+├── trainer/config/qwen3_tts/                                  # Hydra config tree (per AC-9)
+│   ├── qwen3_tts_trainer.yaml
+│   ├── actor/qwen3_tts_actor.yaml
+│   ├── ref/qwen3_tts_ref.yaml
+│   ├── rollout/qwen3_tts_rollout.yaml
+│   └── reward/qwen3_tts_reward.yaml
 └── trainer/qwen3_tts_grpo/                                     # entry point + validator
     ├── launcher.py                                              # validate_qwen3_tts_recipe_config
     └── main.py                                                  # python -m verl_omni.trainer.qwen3_tts_grpo.main

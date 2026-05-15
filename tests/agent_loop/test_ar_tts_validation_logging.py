@@ -80,6 +80,19 @@ def test_emit_validation_artifacts_writes_step_dir(tmp_path: Path) -> None:
     generated = list(step_dirs[0].glob("generated_*.wav"))
     assert len(generated) >= 4  # AC-8 minimum
 
+    # AC-6 scalar metrics carried in metrics.json (AC-8 requirement that
+    # Codex round-4 explicitly flagged).
+    import json
+
+    metrics = json.loads((step_dirs[0] / "metrics.json").read_text())
+    for key in ("mean_reward", "mean_cer", "mean_duration_ratio", "policy_loss", "kl_loss"):
+        assert key in metrics, f"AC-6 metric {key!r} missing from validation metrics.json"
+    # mean_reward is always populated for non-empty outputs.
+    assert metrics["mean_reward"] is not None
+    # policy_loss / kl_loss are null at validation steps (no training update).
+    assert metrics["policy_loss"] is None
+    assert metrics["kl_loss"] is None
+
     good = post_run_check_emitted_artifacts(tmp_path)
     assert good == step_dirs
 

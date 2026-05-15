@@ -1,0 +1,18 @@
+# AR-TTS actor overrides for the Qwen3-TTS GRPO recipe.
+#
+# Composed into ``actor_rollout_ref.actor`` by the parent trainer yaml's
+# ``defaults:`` entry::
+#
+#     - /qwen3_tts/actor@actor_rollout_ref.actor: qwen3_tts_actor
+#
+# The diffusion FSDP actor base (``/diffusion/actor: dp_diffusion_actor``)
+# is loaded first; the values below layer on top.
+#
+# v1 inherits the diffusion FSDP defaults unchanged for the AR-TTS recipe —
+# the diffusion actor's FSDP wrap policy, optimizer, and engine config are
+# adequate for sequence-level GRPO over codec tokens. This file is kept for
+# the canonical per-role packaging layout and as a hook for future
+# AR-specific tweaks (e.g. PPO mini-batch size, optimizer LR for AR).
+
+ppo_mini_batch_size: 4
+ppo_micro_batch_size_per_gpu: 1

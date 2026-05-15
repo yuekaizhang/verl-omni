@@ -322,18 +322,46 @@ class AutoRegressiveTTSAgentLoopWorker:
         if not samples:
             return
 
-        step_metrics: dict[str, Any] = {}
+        # AC-8 requires the per-step metrics.json to carry the AC-6 scalar set.
+        # policy_loss / kl_loss are training-step quantities; for a rollout-only
+        # validation step we emit them as null so the schema is stable but the
+        # operator can see they were not produced this step.
+        step_metrics: dict[str, Any] = {
+            "mean_reward": None,
+            "mean_cer": None,
+            "mean_duration_ratio": None,
+            "policy_loss": None,
+            "kl_loss": None,
+        }
+
         rewards = [o.reward_score for o in outputs if o.reward_score is not None]
         if rewards:
             step_metrics["mean_reward"] = float(sum(rewards) / len(rewards))
+
         cers: list[float] = []
         for o in outputs:
             info = o.extra_fields.get("reward_extra_info") if isinstance(o.extra_fields, dict) else None
             if isinstance(info, dict):
-                per = info.get("per_sample_rewards", [])
-                cers.extend(float(x) for x in per if isinstance(x, (int, float)) and math.isfinite(x))
+                per_cers = info.get("per_sample_cers")
+                if isinstance(per_cers, (list, tuple)):
+                    cers.extend(float(x) for x in per_cers if isinstance(x, (int, float)) and math.isfinite(x))
         if cers:
-            step_metrics["mean_reward_per_sample"] = float(sum(cers) / len(cers))
+            step_metrics["mean_cer"] = float(sum(cers) / len(cers))
+
+        duration_ratios: list[float] = []
+        for o in outputs:
+            target_duration = float(o.extra_fields.get("target_duration") or 0.0)
+            if target_duration <= 0:
+                continue
+            sample_rate = max(int(o.sample_rate or 1), 1)
+            for completion in o.completions:
+                waveform = completion.waveform
+                if waveform is None or not hasattr(waveform, "__len__"):
+                    continue
+                generated = float(len(waveform)) / sample_rate
+                duration_ratios.append(generated / target_duration)
+        if duration_ratios:
+            step_metrics["mean_duration_ratio"] = float(sum(duration_ratios) / len(duration_ratios))
 
         self._validation_step_counter += 1
         try:
