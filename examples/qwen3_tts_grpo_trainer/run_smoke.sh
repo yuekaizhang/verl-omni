@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Qwen3-TTS GRPO smoke run.
+#
+# Prerequisites (set before running):
+#   QWEN3_TTS_MODEL_PATH=Qwen/Qwen3-TTS-12Hz-0.6B-Base   # or local checkpoint dir
+#   QWEN3_ASR_BASE_URL=http://<asr-host>:<port>           # separately-served vLLM Qwen3-ASR
+#   TRAIN_PARQUET=/path/to/train.parquet                  # built via data_process/aishell_voice_clone.py
+#   EVAL_PARQUET=/path/to/eval.parquet
+#
+# GPU layout: this script restricts to CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 per the
+# project policy (reserve GPUs 6-7 for other workloads). The remote Qwen3-ASR
+# server must be launched separately on its own GPU subset.
+
+set -euo pipefail
+
+: "${QWEN3_TTS_MODEL_PATH:?set QWEN3_TTS_MODEL_PATH to the Qwen3-TTS-12Hz-0.6B-Base checkpoint}"
+: "${QWEN3_ASR_BASE_URL:?set QWEN3_ASR_BASE_URL to the remote vLLM Qwen3-ASR endpoint (no co-located mode)}"
+: "${TRAIN_PARQUET:?set TRAIN_PARQUET to the training parquet built by aishell_voice_clone.py}"
+: "${EVAL_PARQUET:?set EVAL_PARQUET to the evaluation parquet built by aishell_voice_clone.py}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
+
+ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
+
+# shellcheck disable=SC2086
+"${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.qwen3_tts_grpo.main \
+  --config-path="${ROOT_DIR}/verl_omni/trainer/config/qwen3_tts" \
+  --config-name=qwen3_tts_trainer \
+  data.train_files="${TRAIN_PARQUET}" \
+  data.val_files="${EVAL_PARQUET}" \
+  actor_rollout_ref.model.path="${QWEN3_TTS_MODEL_PATH}" \
+  reward.reward_model.base_url="${QWEN3_ASR_BASE_URL}" \
+  trainer.total_training_steps=3 \
+  trainer.experiment_name=qwen3_tts_grpo_smoke

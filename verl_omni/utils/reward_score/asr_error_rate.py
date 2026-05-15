@@ -95,6 +95,32 @@ def compute_cer(hypothesis: str, reference: str) -> float:
     return float(_jiwer.cer(reference=ref, hypothesis=hyp))
 
 
+def compute_wer(hypothesis: str, reference: str, tokenize_fn) -> float:
+    """Word Error Rate via jiwer with a caller-supplied Chinese tokenizer.
+
+    Mandarin has no canonical word boundaries, so the caller must provide a
+    ``tokenize_fn(text) -> list[str]`` (e.g. ``jieba.lcut``). The error rate
+    is computed on the space-joined tokens of both reference and hypothesis
+    after the same Mandarin normalization used for CER.
+    """
+
+    if _jiwer is None:
+        raise RuntimeError(
+            "jiwer is required for WER computation but is not installed. "
+            "Add `jiwer` to requirements.txt and reinstall."
+        )
+    if tokenize_fn is None:
+        raise ValueError(
+            "compute_wer requires a tokenize_fn for Mandarin word segmentation. "
+            "CER is the recommended default; WER is opt-in."
+        )
+    hyp = " ".join(tokenize_fn(normalize_mandarin_text(hypothesis)))
+    ref = " ".join(tokenize_fn(normalize_mandarin_text(reference)))
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    return float(_jiwer.wer(reference=ref, hypothesis=hyp))
+
+
 def detect_audio_repetition(
     codec_tokens: list[int] | None,
     repeat_ngram: int = 5,
@@ -153,11 +179,16 @@ def compute_reward(
     duration_pen = 0.0
     repetition_pen = 0.0
 
-    if generated_duration <= cfg.short_audio_seconds:
+    if generated_duration <= 0.0:
+        # Truly empty / silent waveform (zero samples produced).
         empty_pen = cfg.empty_penalty
     else:
         ratio = generated_duration / max(target_duration, 1e-3)
-        if ratio < cfg.duration_low_ratio or ratio > cfg.duration_high_ratio:
+        if (
+            generated_duration <= cfg.short_audio_seconds
+            or ratio < cfg.duration_low_ratio
+            or ratio > cfg.duration_high_ratio
+        ):
             duration_pen = cfg.duration_penalty
 
     if detect_audio_repetition(codec_tokens):

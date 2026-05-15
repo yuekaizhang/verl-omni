@@ -50,14 +50,13 @@ def test_unsupported_output_type_is_typeerror_subclass() -> None:
         raise UnsupportedOutputTypeError("test")
 
 
-def test_completion_audio_requires_matching_lengths_is_caller_contract() -> None:
-    # AC-1 documents that len(logprobs) == len(codec_tokens). Pydantic does
-    # not enforce that at the model layer, but callers must (and tests below
-    # for generate_tts will).
-    c = CompletionAudio(
-        sample_index=0,
-        codec_tokens=[1, 2, 3],
-        logprobs=[-0.1, -0.2],  # mismatched on purpose
-        waveform=np.zeros(1, dtype=np.float32),
-    )
-    assert len(c.codec_tokens) != len(c.logprobs)  # acknowledged: caller-enforced
+def test_completion_audio_rejects_mismatched_logprob_length() -> None:
+    # AC-1 requires len(logprobs) == len(codec_tokens). The model validator
+    # enforces this invariant; callers cannot construct a misaligned object.
+    with pytest.raises(ValueError, match="len\\(codec_tokens\\)"):
+        CompletionAudio(
+            sample_index=0,
+            codec_tokens=[1, 2, 3],
+            logprobs=[-0.1, -0.2],  # mismatched on purpose
+            waveform=np.zeros(1, dtype=np.float32),
+        )

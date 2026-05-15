@@ -1,0 +1,19 @@
+# Reward config for the Qwen3-TTS GRPO recipe.
+#
+# The reward path is HTTP-only against a separately-served remote vLLM
+# Qwen3-ASR server. No co-located mode. base_url MUST be set at launch:
+#     reward.reward_model.base_url=http://<asr-host>:<port>
+
+# @package _global_
+reward:
+  reward_manager:
+    path: verl_omni.reward_loop.reward_manager.asr_error_rate
+    name: AsrErrorRateRewardManager
+  reward_model:
+    base_url: ???
+    model: qwen3-asr
+    timeout_s: 60.0
+    language: zh
+    co_located: false
+    metric: cer
+    chinese_tokenization: null

@@ -11,6 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .reward_manager import VisualRewardManager  # noqa: F401
+from .reward_manager import (  # noqa: F401
+    AsrEndpointConfig,
+    AsrEndpointError,
+    AsrErrorRateRewardManager,
+    RewardOutcome,
+    VisualRewardManager,
+)
 
-__all__ = ["VisualRewardManager"]
+__all__ = [
+    "AsrEndpointConfig",
+    "AsrEndpointError",
+    "AsrErrorRateRewardManager",
+    "RewardOutcome",
+    "VisualRewardManager",
+]

@@ -13,16 +13,26 @@
 # limitations under the License.
 """AR-TTS agent loop, worker, and manager for the Qwen3-TTS GRPO recipe.
 
-These three classes parallel the diffusion stack:
-- :class:`AutoRegressiveTTSSingleTurnAgentLoop` — builds the rollout request
-  from one dataset row and calls ``server.generate_tts``.
-- :class:`AutoRegressiveTTSAgentLoopWorker` — runs the agent loop for a
-  batch and packs grouped audio + logprobs into a :class:`DataProto`.
-- :class:`AutoRegressiveTTSAgentLoopManager` — verl-omni-specific manager
-  wired through ``actor_rollout_ref.rollout.agent.agent_loop_manager_class``.
+The diffusion stack uses three pieces (``DiffusionSingleTurnAgentLoop`` /
+``DiffusionAgentLoopWorker`` / a custom manager). The AR-TTS recipe adds a
+parallel trio:
+
+- :class:`AutoRegressiveTTSSingleTurnAgentLoop` — per-row request builder
+  that calls ``server_manager.generate_tts(...)`` on the AR-TTS server
+  client. Inherits from ``AgentLoopBase`` for registry compatibility but
+  skips the chat-template system-prompt init because TTS rollouts do not
+  use chat tokenization.
+- :class:`AutoRegressiveTTSAgentLoopWorker` — per-batch dispatcher that
+  initializes tokenizer/processor/dataset state, runs grouped rollouts in
+  parallel, dispatches reward computation per grouped sample through the
+  upstream ``reward_loop_worker_handles``, and produces a trainer-ready
+  :class:`DataProto` with padded ``prompts`` / ``responses`` /
+  ``rollout_log_probs`` / ``attention_mask``.
+- :class:`AutoRegressiveTTSAgentLoopManager` — manager subclass wired
+  through ``agent.agent_loop_manager_class`` that injects our worker.
 
 Naming is ``AutoRegressiveTTS*`` (not ``Qwen3TTS*``) because the
-infrastructure is model-generic: any AR speech-token generator that fits
+infrastructure is model-generic — any AR speech-token generator fitting
 the ``(prompt_text, ref_audio, ref_text)`` interface can reuse it.
 """
 
@@ -30,14 +40,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+import random
 from typing import Any
 from uuid import uuid4
 
+import hydra
 import numpy as np
 import ray
+import torch
 from omegaconf import DictConfig
 from pydantic import BaseModel, ConfigDict
+from tensordict import TensorDict
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopBase,
     AgentLoopManager,
@@ -46,58 +61,93 @@ from verl.experimental.agent_loop.agent_loop import (
     _agent_loop_registry,
     register,
 )
+from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
+
+from omegaconf import OmegaConf
+
+from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class AutoRegressiveTTSAgentLoopOutput(BaseModel):
-    """Output produced by one AR-TTS agent loop run (one dataset row).
+# ---------------------------------------------------------------------------- output
 
-    Holds the grouped audio rollout from ``generate_tts`` plus the metrics.
-    The :class:`AutoRegressiveTTSAgentLoopWorker` flattens these into a
-    :class:`DataProto` whose ``responses`` is a list of waveforms and whose
-    extra fields carry the per-sample codec tokens and logprobs.
+
+class AutoRegressiveTTSAgentLoopOutput(BaseModel):
+    """Single-sample output produced by :class:`AutoRegressiveTTSSingleTurnAgentLoop`.
+
+    The worker flattens these into a :class:`DataProto` with padded
+    ``prompts`` / ``responses`` / ``rollout_log_probs`` / ``attention_mask``
+    tensors plus non-tensor metadata for the reward path.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    prompt_ids: list[int]
     prompt_text: str
-    """The text the talker was asked to speak."""
     completions: list[Any]
-    """List of :class:`CompletionAudio` from :class:`AudioRolloutOutput`."""
     sample_rate: int
-    """Codec sample rate of the synthesized audio."""
     reward_score: float | None = None
-    """Reward score, filled in by the reward manager after rollout."""
     num_turns: int = 0
-    """Number of dialogue turns (always 2 for single-turn TTS)."""
     metrics: AgentLoopMetrics
-    """Runtime metrics from the rollout."""
     extra_fields: dict[str, Any] = {}
-    """Bag for ref_audio / target_audio / speaker_id / etc to flow to reward."""
+
+
+# ---------------------------------------------------------------------------- agent loop
 
 
 @register("autoregressive_tts_single_turn_agent")
 class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
     """Single-turn AR-TTS agent loop.
 
-    Reads ``prompt_text``, ``ref_audio``, ``ref_text`` from the dataset row,
-    builds the ``generate_tts`` request, and packages the grouped audio +
-    logprobs for the worker.
+    Reads ``prompt_text`` / ``ref_audio`` / ``ref_text`` from the dataset
+    row, builds the rollout request, and packages the grouped audio +
+    logprobs.
+
+    Overrides :meth:`__init__` to keep tokenizer optional — TTS prompts are
+    raw text plus an audio reference, not a tokenized chat. Upstream
+    ``AgentLoopBase.__init__`` calls ``initialize_system_prompt(tokenizer)``
+    which would fail when the tokenizer is the talker's BPE rather than a
+    chat-template tokenizer.
     """
+
+    def __init__(
+        self,
+        trainer_config: DictConfigWrap,
+        server_manager: Any,
+        tokenizer: Any = None,
+        processor: Any = None,
+        dataset_cls: Any = None,
+        data_config: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        self.config = trainer_config.config
+        self.rollout_config = self.config.actor_rollout_ref.rollout
+        self.server_manager = server_manager
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.dataset_cls = dataset_cls
+        self.data_config = data_config.config if data_config is not None else None
+        # No system prompt for TTS — the talker reads (text, ref_audio, ref_text).
+        self.system_prompt = None
+        from verl.experimental.agent_loop.agent_loop import get_event_loop
+
+        self.loop = get_event_loop()
 
     async def run(  # type: ignore[override]
         self,
         sampling_params: dict[str, Any],
         **kwargs: Any,
     ) -> AutoRegressiveTTSAgentLoopOutput:
-        prompt_text = kwargs["prompt_text"]
+        prompt_text = str(kwargs["prompt_text"])
         ref_audio = kwargs["ref_audio"]
-        ref_text = kwargs["ref_text"]
+        ref_text = str(kwargs["ref_text"])
         n = int(sampling_params.get("n", 2))
 
         metrics: dict[str, Any] = {}
@@ -113,6 +163,11 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
 
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+        metrics.setdefault("tool_calls", 0.0)
+        metrics.setdefault("compute_score", 0.0)
+
+        prompt_ids = self._tokenize_prompt(prompt_text)
+        completions = list(output.completions)
 
         extra_fields = {
             "ref_audio": ref_audio,
@@ -120,30 +175,61 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
             "speaker_id": kwargs.get("speaker_id"),
             "ref_utt_id": kwargs.get("ref_utt_id"),
             "target_utt_id": kwargs.get("target_utt_id"),
-            "target_duration": kwargs.get("target_duration"),
+            "target_duration": float(kwargs.get("target_duration") or 0.0),
             "target_audio": kwargs.get("target_audio"),
             "data_source": kwargs.get("data_source"),
             "stop_reason": output.stop_reason,
+            "sample_rate": output.sample_rate,
         }
 
         return AutoRegressiveTTSAgentLoopOutput(
+            prompt_ids=prompt_ids,
             prompt_text=prompt_text,
-            completions=list(output.completions),
+            completions=completions,
             sample_rate=output.sample_rate,
             num_turns=2,
             metrics=AgentLoopMetrics(**metrics) if not isinstance(metrics, AgentLoopMetrics) else metrics,
             extra_fields=extra_fields,
         )
 
+    def _tokenize_prompt(self, prompt_text: str) -> list[int]:
+        """Tokenize the text prompt with the talker's tokenizer when available.
+
+        Used downstream by the worker to populate ``batch["prompts"]`` so
+        upstream ``AgentLoopManager._performance_metrics`` does not crash.
+        Falls back to a single placeholder token id (``0``) when no
+        tokenizer was injected.
+        """
+
+        if self.tokenizer is None or not prompt_text:
+            return [0]
+        try:
+            ids = self.tokenizer(prompt_text, add_special_tokens=False).get("input_ids")
+            if isinstance(ids, list) and ids:
+                return list(ids)
+        except Exception as exc:  # pragma: no cover - tokenizer differences
+            logger.warning("Talker tokenizer failed on prompt_text; using placeholder. %s", exc)
+        return [0]
+
+
+# ---------------------------------------------------------------------------- worker
+
 
 class AutoRegressiveTTSAgentLoopWorker:
-    """Per-batch AR-TTS rollout dispatcher.
+    """Per-batch AR-TTS rollout dispatcher emitting a trainer-ready :class:`DataProto`.
 
-    Iterates dataset rows, runs each through the AR-TTS agent loop in
-    parallel, and packages the grouped audio + logprobs for the trainer.
+    Mirrors the structure of :class:`verl_omni.agent_loop.diffusion_agent_loop.DiffusionAgentLoopWorker`:
 
-    The pattern mirrors :class:`verl_omni.agent_loop.diffusion_agent_loop.DiffusionAgentLoopWorker`
-    but threads audio-shaped outputs instead of image tensors.
+    - Loads dataset class, tokenizer, processor, agent-loop registry config.
+    - Builds the sampling params dict from ``rollout_config`` and runs each
+      row through :class:`AutoRegressiveTTSSingleTurnAgentLoop` in parallel.
+    - Dispatches reward computation per grouped sample through
+      ``reward_loop_worker_handles`` when available; failed samples
+      (``success=False``) carry ``reward_score=NaN`` and the trainer is
+      expected to mask them out of the GRPO advantage computation.
+    - Pads ``prompts`` / ``responses`` / ``rollout_log_probs`` /
+      ``attention_mask`` into a tensor batch that upstream
+      :meth:`AgentLoopManager._performance_metrics` accepts.
     """
 
     def __init__(
@@ -154,9 +240,24 @@ class AutoRegressiveTTSAgentLoopWorker:
         reward_loop_worker_handles: list[ray.actor.ActorHandle] | None = None,
     ) -> None:
         self.config = config
+        rollout_config = config.actor_rollout_ref.rollout
+        model_config = config.actor_rollout_ref.model
+        self.rollout_config: DiffusionRolloutConfig = omega_conf_to_dataclass(rollout_config)
+        self.model_config: DiffusionModelConfig = omega_conf_to_dataclass(model_config)
+
         self.server_manager = llm_client
         self.reward_loop_worker_handles = reward_loop_worker_handles
-        self._sampling_n_default = int(config.actor_rollout_ref.rollout.get("n", 2))
+
+        self.dataset_cls = get_dataset_class(config.data)
+        self.tokenizer = self.model_config.tokenizer
+        self.processor = self.model_config.processor
+
+        agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
+        if agent_loop_config_path:
+            resolved_path = resolve_config_path(agent_loop_config_path)
+            agent_loop_configs = OmegaConf.load(resolved_path)
+            for agent_loop_config in agent_loop_configs:
+                _agent_loop_registry[agent_loop_config.name] = agent_loop_config
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         sampling_params = self._build_sampling_params(batch)
@@ -177,7 +278,7 @@ class AutoRegressiveTTSAgentLoopWorker:
         rollout = self.config.actor_rollout_ref.rollout
         is_validate = batch.meta_info.get("validate", False)
         params: dict[str, Any] = {
-            "n": int(rollout.get("n", self._sampling_n_default)),
+            "n": int(rollout.get("n", 2)),
             "temperature": float(rollout.get("temperature", 0.9)),
             "top_p": float(rollout.get("top_p", 1.0)),
             "top_k": int(rollout.get("top_k", 50)),
@@ -205,40 +306,208 @@ class AutoRegressiveTTSAgentLoopWorker:
                 "AR-TTS recipes must set default_agent_loop=autoregressive_tts_single_turn_agent."
             )
         agent_loop_config = _agent_loop_registry[agent_name]
-        import hydra
-
         agent_loop = hydra.utils.instantiate(
             config=agent_loop_config,
             trainer_config=DictConfigWrap(config=self.config),
             server_manager=self.server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
         )
-        return await agent_loop.run(sampling_params, **kwargs)
+        output: AutoRegressiveTTSAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+        await self._compute_score(output, kwargs=kwargs)
+        return output
+
+    async def _compute_score(
+        self,
+        output: AutoRegressiveTTSAgentLoopOutput,
+        *,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Score every grouped completion through ``reward_loop_worker_handles``."""
+
+        if not self.reward_loop_worker_handles:
+            return
+        if output.reward_score is not None:
+            return
+
+        timing: dict[str, Any] = {}
+        with simple_timer("compute_score", timing):
+            scores: list[float] = []
+            successes: list[bool] = []
+            transcripts: list[str] = []
+            for completion in output.completions:
+                non_tensor_batch = {
+                    "waveform": np.array([completion.waveform], dtype=object),
+                    "sample_rate": np.array([output.sample_rate]),
+                    "prompt_text": np.array([output.prompt_text]),
+                    "target_duration": np.array([output.extra_fields.get("target_duration", 0.0)]),
+                    "codec_tokens": np.array([list(completion.codec_tokens)], dtype=object),
+                    "data_source": np.array([output.extra_fields.get("data_source", "qwen3_tts")]),
+                }
+                data = DataProto(non_tensor_batch=non_tensor_batch)
+                handle = random.choice(self.reward_loop_worker_handles)
+                result = await handle.compute_score.remote(data)
+                scores.append(float(result["reward_score"]))
+                info = result.get("reward_extra_info", {})
+                successes.append(bool(info.get("success", True)))
+                transcripts.append(str(info.get("transcript", "")))
+
+            # GRPO-mean over successful samples; failed (NaN) samples are excluded.
+            finite = [s for s, ok in zip(scores, successes) if ok and math.isfinite(s)]
+            if finite:
+                output.reward_score = float(sum(finite) / len(finite))
+            else:
+                output.reward_score = math.nan
+            output.extra_fields["reward_extra_info"] = {
+                "per_sample_rewards": scores,
+                "per_sample_success": successes,
+                "per_sample_transcripts": transcripts,
+            }
+        output.metrics.compute_score = timing.get("compute_score", 0.0)
+
+    # ---------------------------------------------------------------- postprocess
 
     def _postprocess(self, outputs: list[AutoRegressiveTTSAgentLoopOutput]) -> DataProto:
-        non_tensor_batch: dict[str, np.ndarray] = {
-            "prompt_text": np.array([o.prompt_text for o in outputs], dtype=object),
-            "completions": np.array([list(o.completions) for o in outputs], dtype=object),
-            "sample_rate": np.array([o.sample_rate for o in outputs], dtype=np.int32),
+        prompt_pad = int(self.rollout_config.prompt_length or 64)
+        response_pad = max(
+            (len(c.codec_tokens) for o in outputs for c in o.completions),
+            default=int(self.rollout_config.response_length or 1),
+        )
+        response_pad = max(response_pad, 1)
+
+        rows_per_sample_prompt: list[torch.Tensor] = []
+        rows_per_sample_response: list[torch.Tensor] = []
+        rows_per_sample_logprobs: list[torch.Tensor] = []
+        rows_per_sample_attention: list[torch.Tensor] = []
+        rows_non_tensor: dict[str, list[Any]] = {
+            "prompt_text": [],
+            "completion_index": [],
+            "sample_rate": [],
+            "waveform": [],
+            "codec_tokens": [],
         }
-        all_extra_keys: set[str] = set()
-        for o in outputs:
-            all_extra_keys.update(o.extra_fields.keys())
-        for key in all_extra_keys:
-            buf = np.empty(len(outputs), dtype=object)
-            buf[:] = [o.extra_fields.get(key) for o in outputs]
-            non_tensor_batch[key] = buf
-        meta_info: dict[str, Any] = {
-            "metrics": [o.metrics.model_dump() if hasattr(o.metrics, "model_dump") else o.metrics for o in outputs],
-        }
-        return DataProto(non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+        for key in (
+            "ref_audio",
+            "ref_text",
+            "speaker_id",
+            "ref_utt_id",
+            "target_utt_id",
+            "target_duration",
+            "target_audio",
+            "data_source",
+        ):
+            rows_non_tensor[key] = []
+        per_sample_rewards: list[float] = []
+        per_sample_success: list[bool] = []
+
+        for output in outputs:
+            prompt_t = self._pad_1d(output.prompt_ids, prompt_pad, pad_value=0)
+            extra = output.extra_fields
+            reward_info = extra.get("reward_extra_info", {}) if isinstance(extra, dict) else {}
+            per_rewards = reward_info.get("per_sample_rewards", [float("nan")] * len(output.completions))
+            per_success = reward_info.get("per_sample_success", [True] * len(output.completions))
+            for i, completion in enumerate(output.completions):
+                rows_per_sample_prompt.append(prompt_t)
+                resp_t = self._pad_1d(list(completion.codec_tokens), response_pad, pad_value=0)
+                rows_per_sample_response.append(resp_t)
+                logp_t = self._pad_1d_float(list(completion.logprobs), response_pad, pad_value=0.0)
+                rows_per_sample_logprobs.append(logp_t)
+                response_mask = (resp_t != 0).long()
+                attention = torch.cat([torch.ones_like(prompt_t), response_mask], dim=-1)
+                rows_per_sample_attention.append(attention)
+                rows_non_tensor["prompt_text"].append(output.prompt_text)
+                rows_non_tensor["completion_index"].append(int(completion.sample_index))
+                rows_non_tensor["sample_rate"].append(int(output.sample_rate))
+                rows_non_tensor["waveform"].append(completion.waveform)
+                rows_non_tensor["codec_tokens"].append(list(completion.codec_tokens))
+                for key in (
+                    "ref_audio",
+                    "ref_text",
+                    "speaker_id",
+                    "ref_utt_id",
+                    "target_utt_id",
+                    "target_duration",
+                    "target_audio",
+                    "data_source",
+                ):
+                    rows_non_tensor[key].append(extra.get(key))
+                per_sample_rewards.append(float(per_rewards[i]) if i < len(per_rewards) else float("nan"))
+                per_sample_success.append(bool(per_success[i]) if i < len(per_success) else True)
+
+        prompts_t = torch.stack(rows_per_sample_prompt, dim=0)
+        responses_t = torch.stack(rows_per_sample_response, dim=0)
+        logprobs_t = torch.stack(rows_per_sample_logprobs, dim=0)
+        attention_t = torch.stack(rows_per_sample_attention, dim=0)
+        rm_scores = torch.tensor(per_sample_rewards, dtype=torch.float32).unsqueeze(-1)
+        success_mask = torch.tensor(per_sample_success, dtype=torch.bool).unsqueeze(-1)
+
+        batch = TensorDict(
+            {
+                "prompts": prompts_t,
+                "responses": responses_t,
+                "rollout_log_probs": logprobs_t,
+                "attention_mask": attention_t,
+                "rm_scores": rm_scores,
+                "success_mask": success_mask,
+            },
+            batch_size=len(rows_per_sample_prompt),
+        )
+
+        non_tensor_batch: dict[str, np.ndarray] = {}
+        for key, values in rows_non_tensor.items():
+            arr = np.empty(len(values), dtype=object)
+            arr[:] = values
+            non_tensor_batch[key] = arr
+
+        metrics = [
+            o.metrics.model_dump() if hasattr(o.metrics, "model_dump") else o.metrics for o in outputs
+        ]
+        # Replicate per-row metrics across each sample for the upstream metric reducer.
+        per_sample_metrics: list[dict[str, Any]] = []
+        for output in outputs:
+            for _ in output.completions:
+                m = output.metrics.model_dump() if hasattr(output.metrics, "model_dump") else dict(output.metrics)
+                m.setdefault("tool_calls", 0.0)
+                m.setdefault("compute_score", 0.0)
+                m.setdefault("num_preempted", -1)
+                m.setdefault("generate_sequences", 0.0)
+                per_sample_metrics.append(m)
+
+        meta_info = {"metrics": per_sample_metrics, "reward_extra_keys": ["transcript"]}
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
+
+    @staticmethod
+    def _pad_1d(values: list[int], length: int, pad_value: int) -> torch.Tensor:
+        if not values:
+            values = [pad_value]
+        if len(values) >= length:
+            return torch.tensor(values[:length], dtype=torch.long)
+        out = torch.full((length,), pad_value, dtype=torch.long)
+        out[: len(values)] = torch.tensor(values, dtype=torch.long)
+        return out
+
+    @staticmethod
+    def _pad_1d_float(values: list[float], length: int, pad_value: float) -> torch.Tensor:
+        if not values:
+            values = [pad_value]
+        if len(values) >= length:
+            return torch.tensor(values[:length], dtype=torch.float32)
+        out = torch.full((length,), pad_value, dtype=torch.float32)
+        out[: len(values)] = torch.tensor(values, dtype=torch.float32)
+        return out
+
+
+# ---------------------------------------------------------------------------- manager
 
 
 class AutoRegressiveTTSAgentLoopManager(AgentLoopManager):
-    """Manager subclass that swaps in :class:`AutoRegressiveTTSAgentLoopWorker`.
+    """Manager subclass that wires :class:`AutoRegressiveTTSAgentLoopWorker`.
 
     The trainer config sets ``actor_rollout_ref.rollout.agent.agent_loop_manager_class``
-    to the FQN of this class so upstream :func:`AgentLoopManager.create()` instantiates
-    the AR-TTS worker instead of the default upstream worker.
+    to the FQN of this class so upstream :func:`AgentLoopManager.create()`
+    instantiates the AR-TTS worker instead of the default upstream worker.
     """
 
     @classmethod

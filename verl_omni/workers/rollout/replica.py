@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from verl.workers.rollout.replica import RolloutReplicaRegistry
 
 
@@ -85,6 +85,16 @@ class CompletionAudio(BaseModel):
     """Stage-1 synthesized audio tensor / numpy array."""
     finish_reason: Optional[str] = None
     """Per-sample finish reason from the talker (e.g. 'stop', 'length')."""
+
+    @model_validator(mode="after")
+    def _check_token_logprob_alignment(self) -> "CompletionAudio":
+        if len(self.codec_tokens) != len(self.logprobs):
+            raise ValueError(
+                "CompletionAudio invariant violated: len(codec_tokens) "
+                f"({len(self.codec_tokens)}) != len(logprobs) ({len(self.logprobs)}). "
+                "Per AC-1 the AR scheduler must populate one logprob per sampled codec token."
+            )
+        return self
 
 
 AudioRolloutOutput.model_rebuild()

@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .asr_error_rate import (
+    AsrEndpointConfig,
+    AsrEndpointError,
+    AsrErrorRateRewardManager,
+    RewardOutcome,
+)
 from .visual import VisualRewardManager
 
-__all__ = ["VisualRewardManager"]
+__all__ = [
+    "AsrEndpointConfig",
+    "AsrEndpointError",
+    "AsrErrorRateRewardManager",
+    "RewardOutcome",
+    "VisualRewardManager",
+]

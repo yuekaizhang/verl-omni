@@ -1,0 +1,25 @@
+# Rollout config for the Qwen3-TTS GRPO recipe.
+# Uses the vllm_omni_tts replica registered in
+# verl_omni/workers/rollout/replica.py.
+
+# @package _global_
+actor_rollout_ref:
+  rollout:
+    name: vllm_omni_tts
+    n: 4
+    temperature: 0.9
+    top_p: 1.0
+    top_k: 50
+    max_tokens: 4096
+    repetition_penalty: 1.05
+    logprobs: 1
+    stop_token_ids: [2150]
+    prompt_length: 64
+    response_length: 4096
+    val_kwargs:
+      temperature: 0.0
+      seed: 42
+    agent:
+      default_agent_loop: autoregressive_tts_single_turn_agent
+      agent_loop_manager_class: verl_omni.agent_loop.autoregressive_tts_agent_loop.AutoRegressiveTTSAgentLoopManager
+      agent_loop_config_path: null

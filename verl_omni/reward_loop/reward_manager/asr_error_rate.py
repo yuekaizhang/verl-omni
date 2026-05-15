@@ -14,26 +14,37 @@
 """ASR-based reward manager for the Qwen3-TTS GRPO recipe.
 
 Calls a separately-served remote vLLM Qwen3-ASR endpoint over HTTP and
-computes a clipped Mandarin CER reward. There is no co-located mode: a
-configuration that asks for an in-process ASR server is rejected at
-construction time.
+computes a clipped Mandarin CER (default) or WER (opt-in with explicit
+Chinese tokenization) reward. There is no co-located mode — a configuration
+that asks for an in-process ASR server is rejected at construction time.
+
+Subclasses :class:`verl.experimental.reward_loop.reward_manager.base.RewardManagerBase`
+so the upstream reward-loop pool can drive it: the trainer's reward worker
+calls :meth:`run_single` for each grouped completion.
 """
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import logging
 import math
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any
+from typing import Any, Callable, Optional
 
 import httpx
 import numpy as np
+import torch
+from omegaconf import DictConfig
+from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+from verl.protocol import DataProto
 
 from verl_omni.utils.reward_score.asr_error_rate import (
     RewardConfig,
     compute_cer,
     compute_reward,
+    compute_wer,
 )
 
 logger = logging.getLogger(__file__)
@@ -66,44 +77,94 @@ class RewardOutcome:
     error: str | None = None
 
 
-class AsrErrorRateRewardManager:
-    """HTTP-only client that scores TTS rollouts via a remote Qwen3-ASR endpoint.
+def _resolve_tokenize_fn(spec: Optional[str]) -> Optional[Callable[[str], list[str]]]:
+    """Resolve a ``module.attr`` tokenize_fn spec (e.g. ``jieba.lcut``) into a callable."""
 
-    Each call returns a :class:`RewardOutcome` with ``success=False`` and a
-    NaN-safe sentinel reward (``math.nan``) when the endpoint fails. The
-    caller (the agent-loop worker or trainer) is expected to exclude failed
-    samples from the GRPO advantage computation. Silent zero-reward fallback
-    is forbidden — that would let endpoint failures look like real samples.
+    if spec is None:
+        return None
+    if "." not in spec:
+        raise ValueError(
+            f"chinese_tokenization must be a dotted module.attr path, got {spec!r}."
+        )
+    module_name, _, attr = spec.rpartition(".")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(
+            f"chinese_tokenization module {module_name!r} cannot be imported: {exc}"
+        ) from exc
+    fn = getattr(module, attr, None)
+    if not callable(fn):
+        raise ValueError(f"{spec!r} does not resolve to a callable.")
+    return fn  # type: ignore[return-value]
+
+
+class AsrErrorRateRewardManager(RewardManagerBase):
+    """HTTP-only Qwen3-ASR reward manager wired into the reward-loop pool.
+
+    Each :meth:`run_single` call processes one grouped sample emitted by the
+    AR-TTS agent loop. Endpoint failures surface as ``success=False`` /
+    ``reward=NaN`` so the trainer can exclude failed samples from the
+    group-advantage computation rather than silently scoring them zero.
     """
 
     def __init__(
         self,
+        config: DictConfig,
+        tokenizer: Any = None,
+        compute_score: Any = None,
         *,
-        endpoint: AsrEndpointConfig,
+        endpoint: AsrEndpointConfig | None = None,
         reward_config: RewardConfig | None = None,
-        metric: str = "cer",
+        metric: str | None = None,
         chinese_tokenization: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        super().__init__(config, tokenizer, compute_score)
+
+        reward_cfg = config.get("reward", {}) if hasattr(config, "get") else {}
+        rm_cfg = reward_cfg.get("reward_model", {}) if hasattr(reward_cfg, "get") else {}
+        if endpoint is None:
+            base_url = rm_cfg.get("base_url") if hasattr(rm_cfg, "get") else None
+            if not base_url:
+                raise ValueError(
+                    "AsrErrorRateRewardManager requires a remote ASR endpoint URL. "
+                    "Pass endpoint=AsrEndpointConfig(base_url=...) or set "
+                    "reward.reward_model.base_url in the recipe config."
+                )
+            endpoint = AsrEndpointConfig(
+                base_url=base_url,
+                model=rm_cfg.get("model", "qwen3-asr") if hasattr(rm_cfg, "get") else "qwen3-asr",
+                timeout_s=float(rm_cfg.get("timeout_s", 60.0)) if hasattr(rm_cfg, "get") else 60.0,
+                language=rm_cfg.get("language", "zh") if hasattr(rm_cfg, "get") else "zh",
+                co_located=bool(rm_cfg.get("co_located", False)) if hasattr(rm_cfg, "get") else False,
+            )
         if endpoint.co_located:
             raise ValueError(
                 "AsrErrorRateRewardManager does not support a co-located ASR mode. "
                 "Launch the vLLM Qwen3-ASR server as a separate process and pass "
-                "its base_url in AsrEndpointConfig."
+                "its base_url."
             )
+
+        metric = metric or (rm_cfg.get("metric", "cer") if hasattr(rm_cfg, "get") else "cer")
         if metric not in ("cer", "wer"):
             raise ValueError(f"Unsupported metric {metric!r}; choose 'cer' or 'wer'.")
+        chinese_tokenization = chinese_tokenization or (
+            rm_cfg.get("chinese_tokenization") if hasattr(rm_cfg, "get") else None
+        )
         if metric == "wer" and not chinese_tokenization:
             raise ValueError(
                 "WER on Mandarin requires an explicit chinese_tokenization config "
-                "(e.g. 'jieba', 'pkuseg'). CER is the recommended default."
+                "(e.g. 'jieba.lcut'). CER is the recommended default."
             )
 
         self._endpoint = endpoint
         self._reward_config = reward_config or RewardConfig()
         self._metric = metric
-        self._chinese_tokenization = chinese_tokenization
+        self._chinese_tokenize_spec = chinese_tokenization
+        self._chinese_tokenize_fn = _resolve_tokenize_fn(chinese_tokenization)
         self._transport = transport
+        self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score) if self.compute_score else True
 
     # ------------------------------------------------------------------ HTTP
 
@@ -124,7 +185,12 @@ class AsrErrorRateRewardManager:
         try:
             import soundfile as sf
 
-            sf.write(buf, waveform, sample_rate, format="WAV")
+            wav = np.asarray(waveform)
+            if wav.dtype.kind == "O":  # object dtype -> unwrap
+                wav = np.asarray(wav.item() if wav.shape == () else wav[0])
+            if wav.dtype not in (np.float32, np.float64, np.int16, np.int32):
+                wav = wav.astype(np.float32)
+            sf.write(buf, wav, int(sample_rate), format="WAV", subtype="PCM_16")
         except Exception as exc:  # pragma: no cover - depends on soundfile/codec presence
             raise AsrEndpointError(f"Failed to encode waveform for STT upload: {exc}") from exc
         buf.seek(0)
@@ -163,6 +229,11 @@ class AsrErrorRateRewardManager:
 
     # --------------------------------------------------------------- scoring
 
+    def _compute_error_rate(self, transcript: str, prompt_text: str) -> float:
+        if self._metric == "wer":
+            return compute_wer(transcript, prompt_text, self._chinese_tokenize_fn)
+        return compute_cer(transcript, prompt_text)
+
     async def score_sample(
         self,
         *,
@@ -192,14 +263,15 @@ class AsrErrorRateRewardManager:
                 error=str(exc),
             )
 
-        cer = compute_cer(hypothesis=transcript, reference=prompt_text)
+        rate = self._compute_error_rate(transcript, prompt_text)
         reward, breakdown = compute_reward(
-            cer=cer,
+            cer=rate,
             generated_duration=generated_duration,
             target_duration=target_duration,
             codec_tokens=codec_tokens,
             config=self._reward_config,
         )
+        breakdown["metric"] = self._metric
         breakdown["generated_duration_seconds"] = float(generated_duration)
         return RewardOutcome(
             success=True,
@@ -207,6 +279,70 @@ class AsrErrorRateRewardManager:
             transcript=transcript,
             breakdown=breakdown,
         )
+
+    # ------------------------------------------------------- reward-loop API
+
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
+        """Per-sample scalar rewards: ``rm_scores`` has shape ``(batch_size, 1)``.
+
+        TTS rollouts produce one reward per grouped sample (one waveform ->
+        one CER -> one scalar). The AR-token GRPO loss reshapes this back
+        into the grouped tensor downstream.
+        """
+
+        return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+
+    async def run_single(self, data: DataProto) -> dict:
+        """Score one grouped TTS sample handed in by the reward-loop worker.
+
+        The agent-loop worker bundles the per-sample inputs into ``data``:
+
+        - ``data.non_tensor_batch["waveform"]``      — synthesized audio array
+        - ``data.non_tensor_batch["sample_rate"]``   — codec sample rate (int)
+        - ``data.non_tensor_batch["prompt_text"]``   — text the talker was asked to speak
+        - ``data.non_tensor_batch["target_duration"]`` — reference duration in seconds
+        - ``data.non_tensor_batch["codec_tokens"]``  — stage-0 token IDs (for repetition detector)
+        """
+
+        assert len(data) == 1, "AsrErrorRateRewardManager.run_single processes one sample at a time."
+
+        def _unwrap(value: Any) -> Any:
+            # DataProto slicing returns per-row numpy arrays; unwrap to the
+            # underlying scalar / object when the array is length-1.
+            if isinstance(value, np.ndarray):
+                if value.shape == ():
+                    return value.item()
+                if value.shape == (1,):
+                    return value[0]
+            return value
+
+        non_tensor = data.non_tensor_batch
+        waveform = _unwrap(non_tensor.get("waveform"))
+        sample_rate = int(_unwrap(non_tensor.get("sample_rate", 24000)) or 24000)
+        prompt_text = str(_unwrap(non_tensor.get("prompt_text", "")))
+        target_duration = float(_unwrap(non_tensor.get("target_duration", 0.0)) or 0.0)
+        codec_tokens = _unwrap(non_tensor.get("codec_tokens"))
+        if codec_tokens is not None and not isinstance(codec_tokens, list):
+            codec_tokens = list(codec_tokens)
+
+        outcome = await self.score_sample(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            prompt_text=prompt_text,
+            target_duration=target_duration,
+            codec_tokens=codec_tokens,
+        )
+
+        return {
+            "reward_score": outcome.reward,
+            "reward_extra_info": {
+                "success": outcome.success,
+                "transcript": outcome.transcript,
+                "error": outcome.error or "",
+                **{k: float(v) if isinstance(v, (int, float)) else v for k, v in outcome.breakdown.items()},
+            },
+        }
 
 
 __all__ = [
