@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Qwen3-TTS GRPO smoke run.
+# Full Qwen3-TTS GRPO training run.
 #
-# Prerequisites (set before running):
-#   QWEN3_TTS_MODEL_PATH=Qwen/Qwen3-TTS-12Hz-0.6B-Base   # or local checkpoint dir
-#   QWEN3_ASR_BASE_URL=http://<asr-host>:<port>           # separately-served vLLM Qwen3-ASR
-#   TRAIN_PARQUET=/path/to/train.parquet                  # built via data_process/aishell_voice_clone.py
-#   EVAL_PARQUET=/path/to/eval.parquet
+# Same wiring as run_smoke.sh but with a longer schedule and wandb logging
+# enabled. Intended for the recipe's reference training curves rather than
+# CI-fast smoke.
 #
-# GPU layout: this script restricts to CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 per the
-# project policy (reserve GPUs 6-7 for other workloads). The remote Qwen3-ASR
-# server must be launched separately on its own GPU subset.
+# Required env (same as run_smoke.sh):
+#   QWEN3_TTS_MODEL_PATH, QWEN3_ASR_BASE_URL, TRAIN_PARQUET, EVAL_PARQUET
+# Optional env:
+#   WANDB_PROJECT (default: verl_omni_qwen3_tts_grpo)
+#   WANDB_NAME    (default: qwen3_tts_grpo_full)
+#   TOTAL_STEPS   (default: 500)
 
 set -euo pipefail
 
@@ -20,13 +21,18 @@ set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
 
+WANDB_PROJECT="${WANDB_PROJECT:-verl_omni_qwen3_tts_grpo}"
+WANDB_NAME="${WANDB_NAME:-qwen3_tts_grpo_full}"
+TOTAL_STEPS="${TOTAL_STEPS:-500}"
+
 ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
 
-# shellcheck disable=SC2086
 "${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.qwen3_tts_grpo.main \
   data.train_files="${TRAIN_PARQUET}" \
   data.val_files="${EVAL_PARQUET}" \
   actor_rollout_ref.model.path="${QWEN3_TTS_MODEL_PATH}" \
   reward.reward_model.base_url="${QWEN3_ASR_BASE_URL}" \
-  trainer.total_training_steps=3 \
-  trainer.experiment_name=qwen3_tts_grpo_smoke
+  trainer.total_training_steps="${TOTAL_STEPS}" \
+  trainer.experiment_name="${WANDB_NAME}" \
+  trainer.project_name="${WANDB_PROJECT}" \
+  trainer.logger='[console,wandb]'

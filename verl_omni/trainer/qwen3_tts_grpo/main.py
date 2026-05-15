@@ -28,13 +28,21 @@ from .launcher import validate_qwen3_tts_recipe_config
 
 
 @hydra.main(
-    config_path="../config/qwen3_tts",
+    config_path="../config",
     config_name="qwen3_tts_trainer",
     version_base=None,
 )
 def main(config: DictConfig) -> None:
+    """Recipe entry point.
+
+    Resolves config from ``verl_omni/trainer/config`` so the ``defaults:``
+    list in ``qwen3_tts/qwen3_tts_trainer.yaml`` can reuse the existing
+    diffusion sub-configs (``diffusion/actor/...``, ``diffusion/rollout/...``,
+    etc.) — the AR-TTS recipe inherits those and overrides only the fields
+    that need to change.
+    """
+
     validate_qwen3_tts_recipe_config(config)
-    # Delegate to upstream PPO/GRPO trainer.
     from verl.trainer.main_ppo import run_ppo
 
     run_ppo(config)

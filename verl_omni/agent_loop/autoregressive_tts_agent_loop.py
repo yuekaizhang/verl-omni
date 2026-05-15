@@ -387,6 +387,13 @@ class AutoRegressiveTTSAgentLoopWorker:
             "sample_rate": [],
             "waveform": [],
             "codec_tokens": [],
+            # Upstream RayPPOTrainer.training_step iterates
+            # batch.non_tensor_batch["multi_modal_inputs"] unconditionally
+            # (see verl.trainer.ppo.ray_trainer:1418). For audio recipes there
+            # are no image/video inputs, so we emit an empty-dict placeholder
+            # per row to keep the trainer's generic bookkeeping path safe.
+            "multi_modal_inputs": [],
+            "__num_turns__": [],
         }
         for key in (
             "ref_audio",
@@ -422,6 +429,8 @@ class AutoRegressiveTTSAgentLoopWorker:
                 rows_non_tensor["sample_rate"].append(int(output.sample_rate))
                 rows_non_tensor["waveform"].append(completion.waveform)
                 rows_non_tensor["codec_tokens"].append(list(completion.codec_tokens))
+                rows_non_tensor["multi_modal_inputs"].append({})
+                rows_non_tensor["__num_turns__"].append(int(output.num_turns))
                 for key in (
                     "ref_audio",
                     "ref_text",

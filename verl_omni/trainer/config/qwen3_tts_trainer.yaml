@@ -1,0 +1,135 @@
+# Qwen3-TTS GRPO recipe (verl-omni)
+#
+# Inherits the diffusion recipe's full config defaults (FSDP actor, ref
+# model, model engine, rollout, model, reward, profiler, trainer, ray_kwargs)
+# and overrides only what the TTS path needs:
+#   - rollout.name: vllm_omni_tts
+#   - default_agent_loop: autoregressive_tts_single_turn_agent
+#   - agent.agent_loop_manager_class: <verl-omni AR-TTS manager FQN>
+#   - data.custom_cls: Qwen3TTSDataset
+#   - algorithm: upstream verl GRPO (overriding DiffusionAlgoConfig)
+#   - reward.reward_manager: AsrErrorRateRewardManager
+#
+# Required overrides at launch:
+#   actor_rollout_ref.model.path=Qwen/Qwen3-TTS-12Hz-0.6B-Base
+#   data.train_files=...
+#   data.val_files=...
+#   reward.reward_model.base_url=http://<asr-host>:<port>
+
+defaults:
+
+  - diffusion/model_engine: dp_diffusion
+
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+
+  - data@data: legacy_data
+
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+
+  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
+
+  - diffusion/model@actor_rollout_ref.model: diffusion_model
+
+  - reward@reward: reward
+
+  - _self_
+
+# Override actor_rollout_ref bits the TTS recipe needs.
+actor_rollout_ref:
+
+  hybrid_engine: true
+
+  nccl_timeout: 600
+
+  model:
+    # The Hub or local checkpoint directory for Qwen3-TTS-12Hz-0.6B-Base.
+    path: ???
+    # Pipeline architecture key recognized by verl-omni's rollout adapter registry.
+    architecture: Qwen3TTSPipeline
+    algorithm: grpo
+    # Reuses the diffusion model_type wiring so the diffusion_agent_loop registry
+    # picks the right model config dataclass; the TTS recipe overrides the
+    # actual agent loop via rollout.agent below.
+    model_type: "diffusion_model"
+
+  rollout:
+    name: vllm_omni_tts
+    n: 4
+    temperature: 0.9
+    top_p: 1.0
+    top_k: 50
+    max_tokens: 4096
+    repetition_penalty: 1.05
+    logprobs: 1
+    stop_token_ids: [2150]
+    prompt_length: 64
+    response_length: 4096
+    val_kwargs:
+      temperature: 0.0
+      seed: 42
+    agent:
+      default_agent_loop: autoregressive_tts_single_turn_agent
+      agent_loop_manager_class: verl_omni.agent_loop.autoregressive_tts_agent_loop.AutoRegressiveTTSAgentLoopManager
+      agent_loop_config_path: null
+
+# Custom dataset class: rows are voice-cloning triples (prompt_text, ref_audio,
+# ref_text, speaker_id, ref_utt_id, target_utt_id, target_duration, data_source).
+data:
+  custom_cls:
+    path: verl_omni.utils.dataset.qwen3_tts_dataset
+    name: Qwen3TTSDataset
+
+# Override the diffusion algorithm with upstream verl GRPO.
+algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  kl_penalty: kl
+  kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
+    type: fixed
+    kl_coef: 0.0
+    horizon: 10000
+    target_kl: 0.1
+  use_pf_ppo: false
+  pf_ppo:
+    reweight_method: pow
+    weight_pow: 2.0
+
+# Swap in the AR-TTS reward manager (HTTP-only, remote Qwen3-ASR).
+reward:
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: importlib
+    name: AsrErrorRateRewardManager
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: pkg://verl_omni.reward_loop.reward_manager
+  reward_model:
+    base_url: ???
+    model: qwen3-asr
+    timeout_s: 60.0
+    language: zh
+    co_located: false
+    metric: cer
+    chinese_tokenization: null
+
+trainer:
+  project_name: verl_omni_qwen3_tts_grpo
+  experiment_name: qwen3_tts_grpo_smoke
+  total_training_steps: 3
+  total_epochs: 1
+  save_freq: 1
+  test_freq: -1
+  logger: ['console']
+  nnodes: 1
+  n_gpus_per_node: 6
+  val_before_train: false
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null

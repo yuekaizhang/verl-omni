@@ -114,3 +114,9 @@ def _load_vllm_omni_tts():
 
 RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 RolloutReplicaRegistry.register("vllm_omni_tts", _load_vllm_omni_tts)
+
+# Install the get_client monkey-patch so the trainer's LLMServerManager returns
+# an AutoRegressiveTTSServerClient when rollout.name == "vllm_omni_tts".
+from verl_omni.workers.rollout._tts_client_patch import apply as _apply_tts_client_patch  # noqa: E402
+
+_apply_tts_client_patch()

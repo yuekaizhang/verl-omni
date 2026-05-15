@@ -104,11 +104,38 @@ CER is the default Mandarin metric. WER is opt-in via
 `reward.reward_model.metric=wer` plus `reward.reward_model.chinese_tokenization=<module.attr>`
 (e.g. `jieba.lcut`).
 
-## Open items (not in v1 smoke)
+## Held-out evaluation
 
-- Held-out evaluation script (`eval.sh`) and `eval_results.json` writer.
-- Validation audio artifact logging (generated / ref / target wavs per step).
-- Full-recipe launcher (`run_full.sh`) and the `docs/recipe/qwen3_tts_grpo.md` page.
+```bash
+QWEN3_ASR_BASE_URL=http://localhost:8001 \
+TRAIN_PARQUET=/path/to/data/train.parquet \
+    bash examples/qwen3_tts_grpo_trainer/eval.sh \
+        /path/to/base.ckpt /path/to/rl.ckpt /path/to/data/eval.parquet
+```
+
+Writes `eval_results.json` with `{base_cer, rl_cer,
+base_median_duration_ratio, rl_median_duration_ratio,
+base_mean_duration_ratio, rl_mean_duration_ratio}`. Pre-run assertion
+rejects overlapping `target_utt_id` between train and eval (AC-7).
+
+## Full training run
+
+`run_full.sh` (longer schedule, wandb logging) is the production
+counterpart to `run_smoke.sh`. Same env vars; optional
+`WANDB_PROJECT` / `WANDB_NAME` / `TOTAL_STEPS` overrides.
+
+## Validation audio logging
+
+`verl_omni.utils.validation_audio_logger.log_validation_step(...)` writes
+per-step directories containing 4 generated `.wav` + 4 reference `.wav` +
+(when `target_audio` is present) 4 target `.wav` files plus
+`metrics.json`. Disk-write failures raise `ArtifactWriteError`; the
+post-run helper `post_run_check_emitted_artifacts(...)` flags any step
+that emitted zero artifacts.
+
+## Reference docs
+
+Full recipe write-up: [`docs/recipe/qwen3_tts_grpo.md`](../../docs/recipe/qwen3_tts_grpo.md).
 
 ## AI assistance disclosure
 
