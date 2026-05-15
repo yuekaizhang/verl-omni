@@ -12,10 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .autoregressive_tts_agent_loop import (
+    AutoRegressiveTTSAgentLoopManager,
+    AutoRegressiveTTSAgentLoopOutput,
+    AutoRegressiveTTSAgentLoopWorker,
+    AutoRegressiveTTSSingleTurnAgentLoop,
+)
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
 __all__ = [
+    "AutoRegressiveTTSAgentLoopManager",
+    "AutoRegressiveTTSAgentLoopOutput",
+    "AutoRegressiveTTSAgentLoopWorker",
+    "AutoRegressiveTTSSingleTurnAgentLoop",
     "DiffusionAgentLoopOutput",
     "DiffusionAgentLoopWorker",
     "DiffusionSingleTurnAgentLoop",

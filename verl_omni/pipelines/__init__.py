@@ -13,8 +13,10 @@
 # limitations under the License.
 
 from . import _patch  # noqa: F401 — apply Ulysses mask fix
+from .qwen3_tts_grpo import *  # noqa: F401, F403
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_mix_grpo import *  # noqa: F401, F403
 
 __all__ = list(qwen_image_flow_grpo.__all__)
 __all__ += list(qwen_image_mix_grpo.__all__)
+__all__ += list(qwen3_tts_grpo.__all__)

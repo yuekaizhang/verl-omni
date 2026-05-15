@@ -70,6 +70,11 @@ class Qwen3TTSDataset(Dataset):
         else:
             paths = [Path(p) for p in data_files]
 
+        if not paths:
+            raise ValueError(
+                "Qwen3TTSDataset requires at least one parquet path; received an empty data_files list."
+            )
+
         frames: list[pd.DataFrame] = []
         for path in paths:
             if not path.exists():

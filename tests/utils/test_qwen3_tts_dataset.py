@@ -126,3 +126,8 @@ def test_max_samples_caps_loaded_rows(tmp_path: Path) -> None:
 def test_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         Qwen3TTSDataset(tmp_path / "does-not-exist.parquet")
+
+
+def test_empty_data_files_rejected() -> None:
+    with pytest.raises(ValueError, match="at least one parquet path"):
+        Qwen3TTSDataset([])
