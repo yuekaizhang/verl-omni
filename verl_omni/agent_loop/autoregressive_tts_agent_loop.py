@@ -492,10 +492,22 @@ class AutoRegressiveTTSAgentLoopWorker:
 
     def _postprocess(self, outputs: list[AutoRegressiveTTSAgentLoopOutput]) -> DataProto:
         prompt_pad = int(self.rollout_config.prompt_length or 64)
-        response_pad = max(
-            (len(c.codec_tokens) for o in outputs for c in o.completions),
-            default=int(self.rollout_config.response_length or 1),
-        )
+        # Pad responses to the *configured* ``response_length``, not the
+        # per-worker observed max. Upstream verl shards the global batch
+        # across multiple ``AutoRegressiveTTSAgentLoopWorker`` actors,
+        # each calling ``_postprocess`` independently, then concats the
+        # per-worker DataProtos via ``DataProto.concat`` (see
+        # ``verl/experimental/agent_loop/agent_loop.py:976``). If two
+        # workers compute different observed maxes (e.g. 4091 vs 3595),
+        # the resulting TensorDicts have mismatched ``responses``
+        # shapes along dim=1, and ``torch.cat(items, dim=0)`` raises
+        # ``RuntimeError: Sizes of tensors must match except in
+        # dimension 0`` (see tensordict ``_torch_func._cat``). Using
+        # the config-level ``response_length`` guarantees every worker
+        # pads to the same fixed size — matching upstream verl's own
+        # tokenizer-based ``_postprocess`` which pads to
+        # ``self.rollout_config.response_length`` (agent_loop.py:551-554).
+        response_pad = int(self.rollout_config.response_length or 1)
         response_pad = max(response_pad, 1)
 
         rows_per_sample_prompt: list[torch.Tensor] = []
