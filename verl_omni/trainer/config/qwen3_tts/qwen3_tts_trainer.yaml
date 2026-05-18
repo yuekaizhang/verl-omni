@@ -108,3 +108,30 @@ ray_kwargs:
   ray_init:
     num_cpus: null
   timeline_json_file: null
+
+# Upstream verl.trainer.main_ppo reads config.transfer_queue.enable on
+# entry. Disable it for the AR-TTS recipe (we don't need cross-stage
+# transfer-queue plumbing on top of vllm-omni's own orchestrator).
+transfer_queue:
+  enable: false
+
+# Upstream verl.trainer.main_ppo also reads config.global_profiler.tool at
+# module entry. Profiling is off by default for the AR-TTS recipe.
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options: {}
+      worker_nsight_options: {}
+    torch_memory:
+      trace_alloc_max_entries: 100000
+      stack_depth: 32
+      context: all
+      stacks: all
+      kw_args: {}
