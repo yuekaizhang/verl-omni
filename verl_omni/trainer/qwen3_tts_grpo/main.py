@@ -25,7 +25,7 @@ import logging
 from pathlib import Path
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from verl_omni.utils.validation_audio_logger import (
     ArtifactWriteError,
@@ -75,6 +75,44 @@ def main(config: DictConfig) -> None:
     """
 
     validate_qwen3_tts_recipe_config(config)
+
+    # Plumb a Ray worker setup hook that registers Qwen3-TTS with HF
+    # AutoConfig/AutoModel inside each worker subprocess. Without this,
+    # TaskRunner and FSDP WorkerDict actors fail with
+    # ``KeyError: 'qwen3_tts'`` / ``Unrecognized configuration class``
+    # because qwen-tts is not auto-registered on import. Doing it via
+    # runtime_env (rather than a venv-wide ``.pth``) confines the heavy
+    # qwen-tts import to actual worker processes — Ray's DashboardAgent,
+    # RuntimeEnvAgent, raylet, etc. do not pay the cost, which would
+    # otherwise stall ``ray.init`` connect for minutes.
+    #
+    # The hook resolves ``qwen3_tts_autoregister.setup`` via importlib,
+    # so the module must be on the worker's PYTHONPATH. The driver
+    # launches with ``python -m verl_omni.trainer.qwen3_tts_grpo.main``
+    # from the project root, which puts the repo root on sys.path —
+    # but Ray's default_worker.py is spawned by raylet without that
+    # ``-m`` context, so we inject the repo root into the worker's
+    # PYTHONPATH explicitly via ``runtime_env.env_vars``.
+    OmegaConf.set_struct(config, False)
+    repo_root = str(Path(__file__).resolve().parents[3])
+    runtime_env = OmegaConf.select(config, "ray_kwargs.ray_init.runtime_env")
+    if runtime_env is None:
+        config.ray_kwargs.ray_init.runtime_env = OmegaConf.create(
+            {
+                "worker_process_setup_hook": "qwen3_tts_autoregister.setup",
+                "env_vars": {"PYTHONPATH": repo_root},
+            }
+        )
+    else:
+        runtime_env["worker_process_setup_hook"] = "qwen3_tts_autoregister.setup"
+        env_vars = runtime_env.get("env_vars") or {}
+        existing_pp = env_vars.get("PYTHONPATH", "")
+        env_vars["PYTHONPATH"] = (
+            f"{repo_root}:{existing_pp}" if existing_pp else repo_root
+        )
+        runtime_env["env_vars"] = env_vars
+    OmegaConf.set_struct(config, True)
+
     from verl.trainer.main_ppo import run_ppo
 
     try:

@@ -47,6 +47,20 @@ actor_rollout_ref:
     # The TTS rollout adapter is selected via rollout.name=vllm_omni_tts
     # instead.
     path: ???
+    # Qwen3-TTS does not ship a flash_attention_2 kernel; upstream verl's
+    # HFModelConfig defaults to flash_attention_2 and raises ImportError
+    # if flash_attn isn't installed. Force ``sdpa`` which the modeling
+    # code supports natively.
+    override_config:
+      attn_implementation: sdpa
+    # Qwen3TTSConfig's attention heads live under
+    # ``config.talker_config.num_attention_heads``, not on the top-level
+    # config or under ``config.text_config``. Upstream verl's
+    # ``apply_monkey_patch`` (called when ``use_remove_padding`` is on)
+    # only knows those two layouts and raises AttributeError. Disable
+    # remove-padding to skip that monkey-patch entirely — the AR-TTS
+    # rollout doesn't pack sequences anyway.
+    use_remove_padding: false
 
 # Custom dataset class: rows are voice-cloning triples
 # (prompt_text, ref_audio, ref_text, speaker_id, ref_utt_id, target_utt_id,

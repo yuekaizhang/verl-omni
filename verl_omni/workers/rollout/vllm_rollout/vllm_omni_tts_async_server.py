@@ -72,6 +72,18 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
     per-token logprobs (required by GRPO).
     """
 
+    def _init_model_config(self, model_config):  # type: ignore[override]
+        # The diffusion-side base class coerces the incoming model_config
+        # into a ``DiffusionModelConfig`` (which drops ``hf_config_path``,
+        # ``override_config``, etc.). Qwen3-TTS is an autoregressive LM
+        # behind a vLLM engine, so it needs ``HFModelConfig`` instead —
+        # the AR rollout path reads ``hf_config_path`` to discover the
+        # tokenizer / generation_config / attn_implementation override.
+        from verl.utils.config import omega_conf_to_dataclass
+        from verl.workers.config.model import HFModelConfig
+
+        return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+
     async def run_server(self, args: argparse.Namespace) -> None:  # type: ignore[override]
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
@@ -79,7 +91,15 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
         engine_args["stage_configs_path"] = str(STAGE_CONFIG_PATH)
         logger.info("[vLLMOmniTTSHttpServer] stage_configs_path=%s", engine_args["stage_configs_path"])
 
-        import_external_libs(self.config.external_lib)
+        # The diffusion base reads ``self.config.external_lib`` but on the
+        # AR-TTS path ``self.config`` is a ``RolloutConfig`` (no
+        # ``external_lib`` field). The model-side external_lib lives on
+        # ``self.model_config`` (an ``HFModelConfig``). Fall back to None
+        # for either layout so we don't fail when the field is absent.
+        external_lib = getattr(self.config, "external_lib", None) or getattr(
+            self.model_config, "external_lib", None
+        )
+        import_external_libs(external_lib)
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)

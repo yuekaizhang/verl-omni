@@ -119,6 +119,11 @@ class AsrErrorRateRewardManager(RewardManagerBase):
         metric: str | None = None,
         chinese_tokenization: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        # Upstream verl's ``load_reward_manager`` forwards a handful of
+        # PPO-runtime kwargs to every reward manager (e.g.
+        # ``reward_router_address`` for the reward router, ``num_examine``).
+        # The AR-TTS manager doesn't use these — accept and ignore.
+        **_unused: Any,
     ) -> None:
         super().__init__(config, tokenizer, compute_score)
 

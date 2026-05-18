@@ -17,20 +17,44 @@ name: vllm_omni_tts
 # Group sampling for GRPO. Codec-token rollouts at n>=2 form one group.
 n: 4
 
-# AR sampling knobs forwarded into vllm.SamplingParams by generate_tts.
+# The Qwen3-TTS 0.6B model fits on a single GPU, and the smoke layout
+# pins 1 FSDP rank per GPU (4 train GPUs total). Upstream defaults TP=2
+# which makes vLLM expect 2 GPUs per worker, conflicting with FSDP's
+# 1-GPU-per-rank allocation and raising
+# ``AssertionError: local_world_size (2) must be less than or equal to
+# the number of visible devices (1)``. Force TP=1.
+tensor_model_parallel_size: 1
+
+# AR sampling knobs forwarded into vllm.SamplingParams by the AR-TTS
+# AgentLoop. Only fields present on upstream verl's RolloutConfig
+# dataclass go at the top level here — see
+# ``verl/workers/config/rollout.py`` for the canonical schema.
+#
+# Per-token max generation length is ``response_length`` (verl), not
+# ``max_tokens`` (vLLM SamplingParams). Per-step extras like
+# ``logprobs`` (vLLM) and ``stop_token_ids`` (vLLM SamplingParams) are
+# forwarded by the AR-TTS adapter via ``engine_kwargs`` instead — adding
+# them at the top level raises
+# ``TypeError: RolloutConfig.__init__() got an unexpected keyword``.
 temperature: 0.9
 top_p: 1.0
 top_k: 50
-max_tokens: 4096
 repetition_penalty: 1.05
-logprobs: 1
-stop_token_ids: [2150]
 prompt_length: 64
 response_length: 4096
 
+# Extra vLLM SamplingParams the AR-TTS AgentLoop forwards into
+# ``vllm.SamplingParams`` per-request: logprobs=1 exposes per-token
+# codec logprobs (needed for the GRPO importance ratio), and
+# stop_token_ids=[2150] is the Qwen3-TTS codec-EOS id (per
+# BL-20260517-qwen3-tts-prompt-and-stage-shape).
+engine_kwargs:
+  vllm:
+    logprobs: 1
+    stop_token_ids: [2150]
+
 val_kwargs:
   temperature: 0.0
-  seed: 42
 
 # Upstream verl PPO requires at least one of log_prob_micro_batch_size /
 # log_prob_micro_batch_size_per_gpu to be explicitly set on the rollout

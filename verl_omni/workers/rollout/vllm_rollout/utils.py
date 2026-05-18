@@ -81,8 +81,54 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             self.add_lora(lora_request)
             logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
         else:
-            logger.info("Loading standard weights (async)")
-            self.load_weights(weights)
+            # FSDP→vLLM Qwen3-TTS bridge.
+            #
+            # Training side is ``Qwen3TTSForConditionalGeneration`` whose
+            # root has two children: ``talker`` (the AR codec head — what
+            # the vLLM-omni stage-0 engine actually runs) and
+            # ``speaker_encoder`` (the reference-audio embedder, consumed
+            # only on the training side).
+            #
+            # vLLM-omni stage 0 loads ``Qwen3TTSTalkerForConditionalGeneration``
+            # directly — its root *is* the talker. So FSDP-side names like
+            # ``talker.embed_tokens.weight`` have to be stripped of the
+            # ``talker.`` prefix before being handed to the rollout, and
+            # ``speaker_encoder.*`` weights have no home on the rollout
+            # side and are dropped.
+            stage0_weights: list[tuple[str, torch.Tensor]] = []
+            dropped = 0
+            for name, tensor in weights:
+                if name.startswith("talker."):
+                    stage0_weights.append((name[len("talker.") :], tensor))
+                elif name.startswith("speaker_encoder."):
+                    dropped += 1
+                else:
+                    # Anything else is unexpected — keep as-is and let
+                    # the model loader raise so we notice.
+                    stage0_weights.append((name, tensor))
+            logger.info(
+                "Qwen3-TTS FSDP→vLLM sync: stripped talker. from %d weights, dropped %d speaker_encoder.* weights",
+                len(stage0_weights),
+                dropped,
+            )
+
+            # vllm-omni 0.18 renamed worker.load_weights -> worker.reload_weights
+            # (which forwards to ``model_runner.reload_weights``). FSDP-side
+            # weights arrive in *original* (unfused) Qwen3-TTS layout
+            # (separate q_proj/k_proj/v_proj, gate_proj/up_proj). vLLM-omni's
+            # Qwen3-TTS model fuses these into qkv_proj / gate_up_proj for
+            # kernel performance. Pass ``is_checkpoint_format=True`` so the
+            # model_runner runs vLLM's checkpoint loader, which knows about
+            # the fusion mapping (see model load_weights in
+            # vllm_omni/model_executor/models/qwen3_tts/).
+            if hasattr(self, "reload_weights"):
+                self.reload_weights(
+                    weights_iterator=iter(stage0_weights),
+                    is_checkpoint_format=True,
+                )
+            else:
+                # Older vllm-omni still exposes ``load_weights``.
+                self.load_weights(stage0_weights)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
