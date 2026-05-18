@@ -81,35 +81,31 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             self.add_lora(lora_request)
             logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
         else:
-            # FSDP→vLLM Qwen3-TTS bridge.
+            # FSDP→vLLM Qwen3-TTS weight forwarding.
             #
             # Training side is ``Qwen3TTSForConditionalGeneration`` whose
-            # root has two children: ``talker`` (the AR codec head — what
-            # the vLLM-omni stage-0 engine actually runs) and
-            # ``speaker_encoder`` (the reference-audio embedder, consumed
-            # only on the training side).
-            #
+            # root has two children: ``talker.*`` and ``speaker_encoder.*``.
             # vLLM-omni stage 0 loads ``Qwen3TTSTalkerForConditionalGeneration``
-            # directly — its root *is* the talker. So FSDP-side names like
-            # ``talker.embed_tokens.weight`` have to be stripped of the
-            # ``talker.`` prefix before being handed to the rollout, and
-            # ``speaker_encoder.*`` weights have no home on the rollout
-            # side and are dropped.
-            stage0_weights: list[tuple[str, torch.Tensor]] = []
-            dropped = 0
-            for name, tensor in weights:
-                if name.startswith("talker."):
-                    stage0_weights.append((name[len("talker.") :], tensor))
-                elif name.startswith("speaker_encoder."):
-                    dropped += 1
-                else:
-                    # Anything else is unexpected — keep as-is and let
-                    # the model loader raise so we notice.
-                    stage0_weights.append((name, tensor))
+            # — its root *is* the talker — and ships its OWN
+            # ``hf_to_vllm_mapper`` (a transformers ``WeightsMapper``) that
+            # rewrites ``talker.model.layers.`` → ``model.layers.``,
+            # ``talker.codec_head.`` → ``lm_head.``, ``speaker_encoder.``
+            # → ``speaker_encoder.`` etc. (see
+            # ``vllm_omni/model_executor/models/qwen3_tts/qwen3_tts_talker.py``).
+            # Pre-stripping ``talker.`` here would break that mapper and
+            # leave the actual model running on dummy / unloaded weights,
+            # which surfaces downstream as a CUDA scatter-gather OOB
+            # assert on the first ``generate_tts`` call.
+            #
+            # Forward weights unchanged and let
+            # ``reload_weights(weights_iterator=..., is_checkpoint_format=True)``
+            # invoke the model's ``load_weights`` → ``AutoWeightsLoader``
+            # → ``hf_to_vllm_mapper`` pipeline.
+            stage0_weights: list[tuple[str, torch.Tensor]] = list(weights)
             logger.info(
-                "Qwen3-TTS FSDP→vLLM sync: stripped talker. from %d weights, dropped %d speaker_encoder.* weights",
+                "Qwen3-TTS FSDP→vLLM sync: forwarding %d weights unchanged "
+                "(stage-0 model's hf_to_vllm_mapper handles the talker./speaker_encoder. rewrite)",
                 len(stage0_weights),
-                dropped,
             )
 
             # vllm-omni 0.18 renamed worker.load_weights -> worker.reload_weights

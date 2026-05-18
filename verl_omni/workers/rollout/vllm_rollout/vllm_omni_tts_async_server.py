@@ -33,7 +33,7 @@ import argparse
 import logging
 from collections import defaultdict
 from dataclasses import asdict
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 import ray
@@ -71,6 +71,33 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
     Loads the verl-omni-side stage_config so stage 0 emits codec tokens +
     per-token logprobs (required by GRPO).
     """
+
+    # Methods whose ``collective_rpc`` must be routed only to stage 0
+    # (the AR codec talker). Stage 1 is the code2wav decoder and has no
+    # FSDP-side weights to receive; if we fan ``update_weights_from_ipc``
+    # to both stages they race on the same ZMQ socket and one stage
+    # hangs forever waiting for buckets that never arrive. See
+    # ``vllm_omni/engine/orchestrator.py:761-762`` — when ``stage_ids``
+    # is not passed the orchestrator defaults to all stages.
+    _STAGE0_ONLY_RPC_METHODS: ClassVar[frozenset[str]] = frozenset({
+        "update_weights_from_ipc",
+    })
+
+    async def collective_rpc(  # type: ignore[override]
+        self,
+        method,
+        timeout=None,
+        args: tuple = (),
+        kwargs=None,
+    ):
+        stage_ids = [0] if method in self._STAGE0_ONLY_RPC_METHODS else None
+        await self.engine.collective_rpc(
+            method=method,
+            timeout=timeout,
+            args=args,
+            kwargs=kwargs,
+            stage_ids=stage_ids,
+        )
 
     def _init_model_config(self, model_config):  # type: ignore[override]
         # The diffusion-side base class coerces the incoming model_config
@@ -153,15 +180,23 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
 
         request_id = request_id or uuid4().hex
 
-        # Build prompt: the Qwen3-TTS Base talker reads text + ref_audio + ref_text
-        # from custom prompt extra_args (see vllm-omni's stage-0 input processor).
-        extra_args = {
-            "text": prompt_text,
-            "ref_audio": ref_audio,
-            "ref_text": ref_text,
-            "task_type": task_type,
+        # Build prompt for Qwen3-TTS Base mode.
+        #
+        # vllm-omni 0.18 switched from the OmniCustomPrompt({"extra_args":...})
+        # shape to vLLM's standard decoder-only schema: a dict with a top-level
+        # ``"prompt"`` (str) plus an ``"additional_information"`` field whose
+        # values are *lists* (one per group sample) of the side-channel inputs.
+        # See BL-20260517-qwen3-tts-prompt-and-stage-shape.
+        additional_information = {
+            "text":      [prompt_text],
+            "ref_audio": [ref_audio],
+            "ref_text":  [ref_text],
+            "task_type": [task_type],
         }
-        custom_prompt: OmniCustomPrompt = {"extra_args": extra_args}
+        custom_prompt = {
+            "prompt": prompt_text,
+            "additional_information": additional_information,
+        }
 
         # Stage 0 sampling params: standard vLLM SamplingParams; logprobs is
         # provided by the yaml override but we re-assert it here so the AR
@@ -178,9 +213,20 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
             stop_token_ids=sampling_params.get("stop_token_ids", [2150]),
         )
 
-        # Stage 1 (code2wav): deterministic decoder; use defaults from the yaml
-        # by passing None — vllm-omni will fall back to the stage config.
-        stage1_sampling: SamplingParams | None = None
+        # Stage 1 (code2wav): deterministic decoder. vllm-omni's orchestrator
+        # calls ``params.clone()`` on the stage-1 SamplingParams in
+        # ``_prewarm_async_chunk_stages`` (see
+        # vllm_omni/engine/orchestrator.py:65,673), so passing ``None``
+        # raises ``AttributeError: 'NoneType' object has no attribute 'clone'``.
+        # Construct a concrete SamplingParams — code2wav doesn't sample
+        # autoregressively but the orchestrator still needs an object to
+        # clone. See BL-20260517-qwen3-tts-prompt-and-stage-shape (the
+        # stage-1 fix that the live smoke needed).
+        stage1_sampling = SamplingParams(
+            temperature=0.0,
+            max_tokens=65536,
+            detokenize=True,
+        )
 
         sampling_params_list = [stage0_sampling, stage1_sampling]
 

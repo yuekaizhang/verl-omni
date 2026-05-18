@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import torch
 from torch.utils.data import Dataset
 
 REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -131,4 +132,14 @@ class Qwen3TTSDataset(Dataset):
             if col in self._df.columns:
                 out[col] = row[col]
         out["target_duration"] = float(out["target_duration"])
+        # All other fields are non-tensor (strings / floats / ids), so
+        # ``DataProto.from_single_dict(...)`` would route them all into
+        # ``non_tensor_batch`` and leave ``.batch is None``. Upstream
+        # verl's ``ray_trainer.fit`` then crashes at
+        # ``range(len(batch.batch))`` with ``TypeError: object of type
+        # 'NoneType' has no len()``. Emit a single shape-[1] tensor per
+        # row so ``DataProto`` builds a TensorDict whose batch length
+        # equals the dataloader batch size — the value itself is
+        # never read by the AR-TTS agent loop.
+        out["__qwen3_tts_batch_marker"] = torch.zeros(1, dtype=torch.long)
         return out
