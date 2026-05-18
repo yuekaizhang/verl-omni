@@ -41,16 +41,21 @@ actor_rollout_ref:
 
   model:
     # The Hub or local checkpoint directory for Qwen3-TTS-12Hz-0.6B-Base.
+    # Upstream verl uses HFModelConfig here; do not add diffusion-only
+    # fields like `architecture` / `algorithm` — those would raise
+    # `TypeError: HFModelConfig.__init__() got an unexpected keyword`.
+    # The TTS rollout adapter is selected via rollout.name=vllm_omni_tts
+    # instead.
     path: ???
-    architecture: Qwen3TTSPipeline
-    algorithm: grpo
 
 # Custom dataset class: rows are voice-cloning triples
 # (prompt_text, ref_audio, ref_text, speaker_id, ref_utt_id, target_utt_id,
 #  target_duration, data_source).
 data:
   custom_cls:
-    path: verl_omni.utils.dataset.qwen3_tts_dataset
+    # upstream verl.utils.import_utils.load_module expects an absolute
+    # FILE PATH to the .py module, not a dotted import path.
+    path: ${oc.env:PWD}/verl_omni/utils/dataset/qwen3_tts_dataset.py
     name: Qwen3TTSDataset
   train_batch_size: 4
   val_batch_size: 4

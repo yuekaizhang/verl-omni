@@ -19,6 +19,13 @@ set -euo pipefail
 : "${EVAL_PARQUET:?set EVAL_PARQUET to the evaluation parquet built by aishell_voice_clone.py}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
+# The Ray/vllm worker raises if both ROCR_VISIBLE_DEVICES and
+# CUDA_VISIBLE_DEVICES are set. Clear the AMD-style env var some
+# container images leak in.
+unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES
+# Force a local-only Ray cluster so we don't accidentally join the
+# host's pre-existing Ray (which may be a different Python/Ray pair).
+export RAY_ADDRESS="${RAY_ADDRESS:-local}"
 
 ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
 

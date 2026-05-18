@@ -63,7 +63,16 @@ class Qwen3TTSDataset(Dataset):
     def __init__(
         self,
         data_files: str | Path | list[str | Path],
+        *,
         max_samples: int = -1,
+        # Upstream verl's dataset factory passes these unconditionally
+        # (see verl/utils/dataset/rl_dataset.py:457-463). The TTS dataset
+        # doesn't tokenize / chat-template the prompt, so we accept and
+        # ignore them.
+        tokenizer: Any = None,
+        processor: Any = None,
+        config: Any = None,
+        **_unused: Any,
     ) -> None:
         if isinstance(data_files, (str, Path)):
             paths = [Path(data_files)]
