@@ -525,6 +525,15 @@ class AutoRegressiveTTSAgentLoopWorker:
             "target_duration",
             "target_audio",
             "data_source",
+            # ``transcript`` is declared in ``meta_info["reward_extra_keys"]``
+            # below (so upstream verl's ``extract_reward`` can pick it up);
+            # the actual per-row strings come from
+            # ``reward_extra_info["per_sample_transcripts"]`` computed in
+            # ``run`` after ASR scoring. Without populating it here the
+            # trainer crashes at
+            # ``verl/trainer/ppo/reward.py:166`` with
+            # ``KeyError: 'transcript'`` when iterating reward_extra_keys.
+            "transcript",
         ):
             rows_non_tensor[key] = []
         per_sample_rewards: list[float] = []
@@ -536,6 +545,9 @@ class AutoRegressiveTTSAgentLoopWorker:
             reward_info = extra.get("reward_extra_info", {}) if isinstance(extra, dict) else {}
             per_rewards = reward_info.get("per_sample_rewards", [float("nan")] * len(output.completions))
             per_success = reward_info.get("per_sample_success", [True] * len(output.completions))
+            per_transcripts = reward_info.get(
+                "per_sample_transcripts", [""] * len(output.completions)
+            )
             for i, completion in enumerate(output.completions):
                 rows_per_sample_prompt.append(prompt_t)
                 resp_t = self._pad_1d(list(completion.codec_tokens), response_pad, pad_value=0)
@@ -563,6 +575,9 @@ class AutoRegressiveTTSAgentLoopWorker:
                     "data_source",
                 ):
                     rows_non_tensor[key].append(extra.get(key))
+                rows_non_tensor["transcript"].append(
+                    str(per_transcripts[i]) if i < len(per_transcripts) else ""
+                )
                 per_sample_rewards.append(float(per_rewards[i]) if i < len(per_rewards) else float("nan"))
                 per_sample_success.append(bool(per_success[i]) if i < len(per_success) else True)
 
@@ -573,12 +588,28 @@ class AutoRegressiveTTSAgentLoopWorker:
         rm_scores = torch.tensor(per_sample_rewards, dtype=torch.float32).unsqueeze(-1)
         success_mask = torch.tensor(per_sample_success, dtype=torch.bool).unsqueeze(-1)
 
+        # Upstream verl's ``_compute_old_log_prob`` calls
+        # ``left_right_2_no_padding`` which asserts the batch carries
+        # ``input_ids``, ``attention_mask``, ``response_mask`` and
+        # ``position_ids`` (see
+        # ``verl/workers/utils/padding.py:39-42``). Synthesise them from
+        # the prompts/responses we already have so the actor's log-prob
+        # recompute path can run without changes.
+        input_ids_t = torch.cat([prompts_t, responses_t], dim=-1)
+        response_mask_t = (responses_t != 0).long()
+        # position_ids are derived from attention_mask cumulative sum so
+        # left-padded prompts get position 0 at the first real token.
+        position_ids_t = (attention_t.long().cumsum(dim=-1) - 1).clamp(min=0)
+
         batch = TensorDict(
             {
                 "prompts": prompts_t,
                 "responses": responses_t,
                 "rollout_log_probs": logprobs_t,
                 "attention_mask": attention_t,
+                "response_mask": response_mask_t,
+                "input_ids": input_ids_t,
+                "position_ids": position_ids_t,
                 "rm_scores": rm_scores,
                 "success_mask": success_mask,
             },

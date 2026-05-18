@@ -68,6 +68,44 @@ def setup() -> None:
             "verl.workers.rollout.vllm_rollout.ServerAdapter"
         )
 
+    # verl's ``attention_utils._get_attention_functions`` hard-imports
+    # ``flash_attn.bert_padding`` on CUDA (see
+    # ``verl/utils/attention_utils.py:30``). On environments without
+    # flash_attn installed, ``_compute_old_log_prob`` →
+    # ``left_right_2_no_padding`` → ``unpad_input`` then crashes with
+    # ``ModuleNotFoundError: No module named 'flash_attn'`` *after*
+    # rollouts succeed. Transformers ships pure-PyTorch fallbacks at
+    # ``transformers.modeling_flash_attention_utils._{unpad_input,
+    # pad_input, index_first_axis}`` — swap them in here so the FSDP
+    # log-prob recompute path works without flash_attn.
+    try:
+        from verl.utils import attention_utils as _verl_attn
+        from transformers.modeling_flash_attention_utils import (
+            _index_first_axis as _tf_index_first_axis,
+            _pad_input as _tf_pad_input,
+            _unpad_input as _tf_unpad_input,
+        )
+        try:
+            from einops import rearrange as _einops_rearrange
+        except ImportError:
+            _einops_rearrange = None
+    except ImportError:
+        pass
+    else:
+        def _patched_get_attention_functions():
+            return (
+                _tf_index_first_axis,
+                _tf_pad_input,
+                _einops_rearrange,
+                _tf_unpad_input,
+            )
+
+        _verl_attn._get_attention_functions = _patched_get_attention_functions
+        _verl_attn._index_first_axis = _tf_index_first_axis
+        _verl_attn._pad_input = _tf_pad_input
+        _verl_attn._rearrange = _einops_rearrange
+        _verl_attn._unpad_input = _tf_unpad_input
+
     # Qwen3TTSConfig holds all the standard transformer hyperparameters
     # (hidden_size, num_attention_heads, etc.) under ``talker_config``,
     # not at the top level. Upstream verl's FSDP / monkey-patch code
@@ -117,5 +155,22 @@ def setup() -> None:
             ),
         )
         Qwen3TTSConfig._verl_layout_bridge_applied = True
+
+    # ``Qwen3TTSForConditionalGeneration`` is designed to be driven via
+    # ``generate()`` only — it inherits the ``nn.Module._forward_unimplemented``
+    # stub at the top level (verified via
+    # ``inspect.signature(...) == (self, *input)``). verl's PPO/GRPO
+    # actor calls ``model(input_ids=..., attention_mask=...,
+    # position_ids=...)`` for both ``_compute_old_log_prob`` and
+    # ``update_actor`` (the gradient step), which raises
+    # ``TypeError: _forward_unimplemented() got an unexpected keyword
+    # argument 'input_ids'``. The internal ``self.talker`` IS a
+    # standard HF CausalLM with a real forward, so delegate.
+    if not getattr(Qwen3TTSForConditionalGeneration, "_verl_forward_shim_applied", False):
+        def _talker_forward_shim(self, *args, **kwargs):
+            return self.talker(*args, **kwargs)
+
+        Qwen3TTSForConditionalGeneration.forward = _talker_forward_shim
+        Qwen3TTSForConditionalGeneration._verl_forward_shim_applied = True
 
     _REGISTERED = True

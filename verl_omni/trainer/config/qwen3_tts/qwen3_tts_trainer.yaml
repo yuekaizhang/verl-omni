@@ -79,6 +79,18 @@ algorithm:
   adv_estimator: grpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
+  # Qwen3TTSForConditionalGeneration does not define a top-level
+  # ``forward()`` that accepts the standard ``(input_ids,
+  # attention_mask, position_ids)`` kwargs — it inherits the nn.Module
+  # stub and is only meant to be driven via ``generate()``. verl's
+  # ``_compute_old_log_prob`` would normally re-run a forward to
+  # recompute log-probs at the new policy, but with this model that
+  # fails as ``TypeError: _forward_unimplemented() got an unexpected
+  # keyword argument 'input_ids'``. Switch to rollout-correction
+  # bypass mode (``old_log_probs = rollout_log_probs``) which uses the
+  # log-probs vLLM already emitted during the codec rollout.
+  rollout_correction:
+    bypass_mode: true
 
 # GRPO doesn't use a critic; disable it (the upstream RayPPOTrainer skips
 # critic worker construction when this is false).

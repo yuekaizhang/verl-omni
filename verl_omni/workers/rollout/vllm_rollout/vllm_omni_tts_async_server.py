@@ -201,6 +201,20 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
         # Stage 0 sampling params: standard vLLM SamplingParams; logprobs is
         # provided by the yaml override but we re-assert it here so the AR
         # scheduler always attaches per-token logprobs to EngineCoreOutput.
+        #
+        # Note on repetition_penalty: vLLM's ``apply_penalties``
+        # (``vllm/model_executor/layers/utils.py:87``) computes
+        # ``get_token_bin_counts_and_mask(prompt_tokens_tensor, vocab_size=logits.shape[1], ...)``
+        # which scatter-adds the prompt token IDs into a bucket indexed
+        # by *output* vocab size. For Qwen3-TTS stage 0 the logits vocab
+        # is the codec vocab (~3072), but the prompt token IDs are HF
+        # tokenizer IDs (vocab ~151K). Any prompt ID >= 3072 makes the
+        # scatter raise ``CUDA error: device-side assert triggered``
+        # (``ScatterGatherKernel.cu:163``: ``scatter gather kernel index
+        # out of bounds``). Hard-forcing repetition_penalty=1.0 (no
+        # penalty) bypasses ``apply_penalties`` entirely, which is the
+        # right behavior for codec sampling anyway — repetition penalty
+        # is text-LM-specific.
         stage0_sampling = SamplingParams(
             n=n,
             temperature=sampling_params.get("temperature", 0.9),
@@ -209,7 +223,7 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
             max_tokens=sampling_params.get("max_tokens", 4096),
             seed=sampling_params.get("seed"),
             logprobs=int(sampling_params.get("logprobs", 1)),
-            repetition_penalty=sampling_params.get("repetition_penalty", 1.05),
+            repetition_penalty=1.0,
             stop_token_ids=sampling_params.get("stop_token_ids", [2150]),
         )
 
