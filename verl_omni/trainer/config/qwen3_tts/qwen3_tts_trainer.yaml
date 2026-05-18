@@ -75,7 +75,10 @@ trainer:
   test_freq: -1
   logger: ['console']
   nnodes: 1
-  n_gpus_per_node: 5
+  # 4 train GPUs (0-3); GPU 4 reserved for the remote Qwen3-ASR server.
+  # train_batch_size × rollout.n (4 × 4 = 16) must be divisible by
+  # n_gpus_per_node (4), so the upstream validate_config assertion passes.
+  n_gpus_per_node: 4
   val_before_train: false
 
 # Disable cross-stage transfer queue (we use vllm-omni's own orchestrator).

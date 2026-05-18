@@ -32,6 +32,11 @@ val_kwargs:
   temperature: 0.0
   seed: 42
 
+# Upstream verl PPO requires at least one of log_prob_micro_batch_size /
+# log_prob_micro_batch_size_per_gpu to be explicitly set on the rollout
+# block (check_mutually_exclusive in verl/utils/config.py).
+log_prob_micro_batch_size_per_gpu: 1
+
 agent:
   # The AR-TTS AgentLoop registered via @register decorator.
   default_agent_loop: autoregressive_tts_single_turn_agent
