@@ -102,7 +102,14 @@ trainer:
   experiment_name: qwen3_tts_grpo_smoke
   total_training_steps: 3
   total_epochs: 1
-  save_freq: 1
+  # Disable checkpoint save for the smoke: transformers'
+  # ``recursive_diff_dict`` (``transformers/configuration_utils.py:1353``)
+  # accesses ``default[key]`` for every key in the loaded config, and a
+  # fresh ``Qwen3TTSConfig()`` doesn't have ``dtype`` at the top level
+  # (it's stored on the talker_config sub-config), raising
+  # ``KeyError: 'dtype'`` at save time. The smoke just verifies the
+  # rollout/reward/training loop; persisting weights is out of scope.
+  save_freq: -1
   test_freq: -1
   logger: ['console']
   nnodes: 1

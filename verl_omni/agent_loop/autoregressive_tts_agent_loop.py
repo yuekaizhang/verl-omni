@@ -595,7 +595,28 @@ class AutoRegressiveTTSAgentLoopWorker:
         # ``verl/workers/utils/padding.py:39-42``). Synthesise them from
         # the prompts/responses we already have so the actor's log-prob
         # recompute path can run without changes.
-        input_ids_t = torch.cat([prompts_t, responses_t], dim=-1)
+        #
+        # Qwen3-TTS specific: the talker's codec head outputs logits of
+        # size = codec vocab (~3072), so verl's downstream gather of
+        # ``logits[..., input_ids_rolled]`` (see
+        # ``verl/workers/engine/fsdp/transformer_impl.py:1086``
+        # ``logprobs_from_logits``) requires every id in
+        # ``input_ids`` to be < codec vocab. The ``prompts_t`` portion
+        # carries HF tokenizer ids (vocab ~151K), which would raise
+        # ``CUDA error: device-side assert triggered``
+        # (``ScatterGatherKernel.cu:163``). Clamp out-of-range ids to
+        # ``codec_pad_id``; the prompt portion is then a no-op codec
+        # placeholder, and the response portion (already codec ids in
+        # [0, codec_vocab)) passes through unchanged. The loss is
+        # masked to the response region via ``response_mask`` anyway.
+        codec_vocab = 3072
+        codec_pad_id = 2148
+        clamped_prompts = torch.where(
+            (prompts_t >= 0) & (prompts_t < codec_vocab),
+            prompts_t,
+            torch.full_like(prompts_t, codec_pad_id),
+        )
+        input_ids_t = torch.cat([clamped_prompts, responses_t], dim=-1)
         response_mask_t = (responses_t != 0).long()
         # position_ids are derived from attention_mask cumulative sum so
         # left-padded prompts get position 0 at the first real token.

@@ -101,11 +101,34 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             # ``reload_weights(weights_iterator=..., is_checkpoint_format=True)``
             # invoke the model's ``load_weights`` → ``AutoWeightsLoader``
             # → ``hf_to_vllm_mapper`` pipeline.
-            stage0_weights: list[tuple[str, torch.Tensor]] = list(weights)
+            #
+            # Speaker-encoder caveat: vllm-omni's
+            # ``Qwen3TTSTalkerForConditionalGeneration.load_weights``
+            # lazily builds ``self.speaker_encoder`` on the FIRST call
+            # that sees ``speaker_encoder.*`` weights, then loads them.
+            # On subsequent calls the AutoWeightsLoader can't navigate
+            # the existing speaker_encoder submodules (raises
+            # ``ValueError: There is no module or parameter named
+            # 'speaker_encoder.blocks.0.conv.weight' ... available
+            # parameters belonging to ... (Conv1d) are: set()``). The
+            # speaker_encoder takes a *reference audio* and produces a
+            # speaker embedding — it's read-only relative to the policy
+            # being trained, so we can safely skip its weights on every
+            # call after the first.
+            seen_speaker = getattr(self, "_qwen3_tts_speaker_encoder_synced", False)
+            if seen_speaker:
+                stage0_weights = [
+                    (n, t) for (n, t) in weights
+                    if not n.startswith("speaker_encoder.")
+                ]
+            else:
+                stage0_weights = list(weights)
+                self._qwen3_tts_speaker_encoder_synced = True
             logger.info(
-                "Qwen3-TTS FSDP→vLLM sync: forwarding %d weights unchanged "
-                "(stage-0 model's hf_to_vllm_mapper handles the talker./speaker_encoder. rewrite)",
+                "Qwen3-TTS FSDP→vLLM sync: forwarding %d weights "
+                "(speaker_encoder %s)",
                 len(stage0_weights),
+                "skipped (already synced)" if seen_speaker else "included (first sync)",
             )
 
             # vllm-omni 0.18 renamed worker.load_weights -> worker.reload_weights

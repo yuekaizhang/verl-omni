@@ -158,19 +158,111 @@ def setup() -> None:
 
     # ``Qwen3TTSForConditionalGeneration`` is designed to be driven via
     # ``generate()`` only — it inherits the ``nn.Module._forward_unimplemented``
-    # stub at the top level (verified via
-    # ``inspect.signature(...) == (self, *input)``). verl's PPO/GRPO
-    # actor calls ``model(input_ids=..., attention_mask=...,
-    # position_ids=...)`` for both ``_compute_old_log_prob`` and
-    # ``update_actor`` (the gradient step), which raises
-    # ``TypeError: _forward_unimplemented() got an unexpected keyword
-    # argument 'input_ids'``. The internal ``self.talker`` IS a
-    # standard HF CausalLM with a real forward, so delegate.
+    # stub at the top level. verl's PPO/GRPO actor calls
+    # ``model(input_ids=..., attention_mask=..., position_ids=...,
+    # labels=...)`` during ``update_actor`` (gradient step), which
+    # raises ``TypeError: _forward_unimplemented() got an unexpected
+    # keyword argument 'input_ids'``.
+    #
+    # The internal ``self.talker`` has a forward, but it expects
+    # ref-audio-derived ``inputs_embeds`` (prefill branch at
+    # ``modeling_qwen3_tts.py:1665``) or ``past_hidden /
+    # trailing_text_hidden / tts_pad_embed`` (generate branch at line
+    # 1669) — neither of which verl supplies. Delegating directly to
+    # ``self.talker(*args, **kwargs)`` falls through to the generate
+    # branch and crashes on ``past_hidden=None``.
+    #
+    # The shim below bypasses both of the talker's custom branches and
+    # drives the underlying ``self.talker.model`` (the plain Qwen3
+    # decoder) + ``self.talker.codec_head`` directly. Tokens that fall
+    # outside the codec vocab (i.e. the HF-tokenized prompt portion of
+    # ``input_ids = cat(prompts, responses)``) are clamped to
+    # ``codec_pad_id`` so the codec embedding lookup stays in range;
+    # labels for those tokens are masked to ``-100``.
+    #
+    # This is sufficient for verl's GRPO plumbing — policy_loss can be
+    # computed against the codec response_mask region — but it is NOT
+    # a faithful Qwen3-TTS training-time forward: the prompt-embed
+    # reconstruction (which depends on ref_audio + text) is replaced
+    # by a no-op codec_pad placeholder, so gradients on the prefill
+    # region are uninformative. The right long-term fix is to thread
+    # ``additional_information`` through ``model_kwargs`` and let the
+    # shim invoke ``self.talker._build_prompt_embeds`` per-row.
     if not getattr(Qwen3TTSForConditionalGeneration, "_verl_forward_shim_applied", False):
-        def _talker_forward_shim(self, *args, **kwargs):
-            return self.talker(*args, **kwargs)
+        from transformers.modeling_outputs import CausalLMOutputWithPast as _CausalLMOutputWithPast
+        import torch as _torch
+        import torch.nn.functional as _F
 
-        Qwen3TTSForConditionalGeneration.forward = _talker_forward_shim
+        def _talker_training_forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            position_ids=None,
+            labels=None,
+            inputs_embeds=None,
+            past_key_values=None,
+            use_cache=False,
+            output_attentions=False,
+            output_hidden_states=False,
+            **kwargs,
+        ):
+            talker = self.talker
+            talker_cfg = talker.config
+
+            if inputs_embeds is None:
+                if input_ids is None:
+                    raise ValueError(
+                        "Qwen3-TTS training-shape forward requires input_ids or inputs_embeds."
+                    )
+                codec_vocab = int(getattr(talker_cfg, "vocab_size", 3072))
+                pad_id = int(getattr(talker_cfg, "codec_pad_id", 0))
+                safe_input_ids = _torch.where(
+                    (input_ids >= 0) & (input_ids < codec_vocab),
+                    input_ids,
+                    _torch.full_like(input_ids, pad_id),
+                )
+                inputs_embeds = talker.get_input_embeddings()(safe_input_ids)
+
+            outputs = talker.model(
+                input_ids=None,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+
+            hidden_states = outputs.last_hidden_state
+            logits = talker.codec_head(hidden_states)
+
+            loss = None
+            if labels is not None:
+                codec_vocab = int(getattr(talker_cfg, "vocab_size", logits.shape[-1]))
+                safe_labels = _torch.where(
+                    (labels >= 0) & (labels < codec_vocab),
+                    labels,
+                    _torch.full_like(labels, -100),
+                )
+                # Standard HF causal-LM loss: shift by one and cross-entropy.
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = safe_labels[..., 1:].contiguous()
+                loss = _F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+
+            return _CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+
+        Qwen3TTSForConditionalGeneration.forward = _talker_training_forward
         Qwen3TTSForConditionalGeneration._verl_forward_shim_applied = True
 
     _REGISTERED = True
