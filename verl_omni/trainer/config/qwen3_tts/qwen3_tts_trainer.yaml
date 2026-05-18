@@ -1,18 +1,17 @@
 # @package _global_
 # Qwen3-TTS GRPO recipe (verl-omni)
 #
-# Top-level trainer yaml. Lives under ``verl_omni/trainer/config/qwen3_tts/``
-# per the AC-9 packaging contract, alongside per-role subdirs:
+# Inherits the full upstream PPO config schema (`ppo_base.yaml`, which is a
+# verbatim copy of verl's `_generated_ppo_trainer.yaml`) and layers TTS
+# overrides on top via the per-role subdirs:
 #
 #   qwen3_tts/
 #   ├── qwen3_tts_trainer.yaml        # this file
+#   ├── ppo_base.yaml                 # upstream PPO schema (do not edit)
 #   ├── actor/qwen3_tts_actor.yaml
 #   ├── ref/qwen3_tts_ref.yaml
 #   ├── rollout/qwen3_tts_rollout.yaml
 #   └── reward/qwen3_tts_reward.yaml
-#
-# Each per-role file is a thin TTS-specific override that Hydra layers
-# on top of the corresponding diffusion / shared base config.
 #
 # Required overrides at launch:
 #   actor_rollout_ref.model.path=Qwen/Qwen3-TTS-12Hz-0.6B-Base
@@ -22,75 +21,50 @@
 
 defaults:
 
-  # Use absolute (`/`-prefixed) paths so groups resolve against the config
-  # search root (``verl_omni/trainer/config/``), not against this file's
-  # subdirectory (``qwen3_tts/``).
-  #
-  # Each role is loaded in two passes: the diffusion / shared base first,
-  # then the qwen3_tts/<role>/qwen3_tts_<role> override on top. Hydra
-  # merges the second over the first by path.
+  # Pull the full upstream PPO config (critic, transfer_queue, global_profiler,
+  # actor / rollout / ref / reward, ray_kwargs, trainer, …). Everything below
+  # is then a delta on top of this baseline.
+  - ppo_base
 
-  - /diffusion/model_engine: dp_diffusion
-
-  - /diffusion/actor@actor_rollout_ref.actor: dp_diffusion_actor
+  # Per-role TTS deltas merged into the right sub-paths.
   - /qwen3_tts/actor@actor_rollout_ref.actor: qwen3_tts_actor
-
-  - /data@data: legacy_data
-
-  - /diffusion/ref@actor_rollout_ref.ref: dp_diffusion_ref
   - /qwen3_tts/ref@actor_rollout_ref.ref: qwen3_tts_ref
-
-  - /diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
   - /qwen3_tts/rollout@actor_rollout_ref.rollout: qwen3_tts_rollout
-
-  - /diffusion/model@actor_rollout_ref.model: diffusion_model
-
-  - /reward@reward: reward
   - /qwen3_tts/reward@reward: qwen3_tts_reward
 
   - _self_
 
-# Top-level fields below are recipe-wide overrides that don't fit a per-role
-# subdir (or that the trainer reads at the top level).
-
+# Recipe-wide top-level overrides.
 actor_rollout_ref:
 
   hybrid_engine: true
-  nccl_timeout: 600
 
   model:
     # The Hub or local checkpoint directory for Qwen3-TTS-12Hz-0.6B-Base.
     path: ???
     architecture: Qwen3TTSPipeline
     algorithm: grpo
-    model_type: "diffusion_model"
 
-# Custom dataset class: rows are voice-cloning triples (prompt_text, ref_audio,
-# ref_text, speaker_id, ref_utt_id, target_utt_id, target_duration, data_source).
+# Custom dataset class: rows are voice-cloning triples
+# (prompt_text, ref_audio, ref_text, speaker_id, ref_utt_id, target_utt_id,
+#  target_duration, data_source).
 data:
   custom_cls:
     path: verl_omni.utils.dataset.qwen3_tts_dataset
     name: Qwen3TTSDataset
+  train_batch_size: 4
+  val_batch_size: 4
 
-# Override the diffusion algorithm with upstream verl GRPO.
+# Override the upstream PPO algorithm to GRPO.
 algorithm:
-  _target_: verl.trainer.config.AlgoConfig
-  gamma: 1.0
-  lam: 1.0
   adv_estimator: grpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
-  kl_penalty: kl
-  kl_ctrl:
-    _target_: verl.trainer.config.KLControlConfig
-    type: fixed
-    kl_coef: 0.0
-    horizon: 10000
-    target_kl: 0.1
-  use_pf_ppo: false
-  pf_ppo:
-    reweight_method: pow
-    weight_pow: 2.0
+
+# GRPO doesn't use a critic; disable it (the upstream RayPPOTrainer skips
+# critic worker construction when this is false).
+critic:
+  enable: false
 
 trainer:
   project_name: verl_omni_qwen3_tts_grpo
@@ -101,37 +75,9 @@ trainer:
   test_freq: -1
   logger: ['console']
   nnodes: 1
-  n_gpus_per_node: 6
+  n_gpus_per_node: 5
   val_before_train: false
 
-ray_kwargs:
-  ray_init:
-    num_cpus: null
-  timeline_json_file: null
-
-# Upstream verl.trainer.main_ppo reads config.transfer_queue.enable on
-# entry. Disable it for the AR-TTS recipe (we don't need cross-stage
-# transfer-queue plumbing on top of vllm-omni's own orchestrator).
+# Disable cross-stage transfer queue (we use vllm-omni's own orchestrator).
 transfer_queue:
   enable: false
-
-# Upstream verl.trainer.main_ppo also reads config.global_profiler.tool at
-# module entry. Profiling is off by default for the AR-TTS recipe.
-global_profiler:
-  _target_: verl.utils.profiler.ProfilerConfig
-  tool: null
-  steps: null
-  profile_continuous_steps: false
-  save_path: outputs/profile
-  global_tool_config:
-    nsys:
-      _target_: verl.utils.profiler.config.NsightToolConfig
-      discrete: false
-      controller_nsight_options: {}
-      worker_nsight_options: {}
-    torch_memory:
-      trace_alloc_max_entries: 100000
-      stack_depth: 32
-      context: all
-      stacks: all
-      kw_args: {}
