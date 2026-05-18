@@ -107,12 +107,17 @@ async def _run(args: argparse.Namespace) -> int:
         enforce_eager=True,
     )
 
-    # The Qwen3-TTS talker reads ``task_type``, ``ref_audio``, ``ref_text``
-    # from ``info_dict`` (which is sourced from the prompt's
-    # ``additional_information`` field). ``task_type`` is indexed as
-    # ``info_dict.get("task_type")[0]`` so we pass it as a one-element list.
+    # The Qwen3-TTS talker reads its inputs from ``additional_information``:
+    #   text       -> list[str], indexed as info_dict["text"][0]
+    #   task_type  -> list[str], indexed as info_dict["task_type"][0]
+    #   ref_text   -> list[str]
+    #   ref_audio  -> path or waveform
+    # vllm's input preprocessor also requires a top-level ``prompt`` field, so
+    # we send the prompt_text in both places (talker reads from
+    # additional_information, preprocessor reads from prompt).
     additional_information = {
-        "ref_audio": args.ref_audio,
+        "text": [args.prompt_text],
+        "ref_audio": [args.ref_audio],
         "ref_text": [args.ref_text],
         "task_type": ["Base"],
     }
@@ -146,7 +151,9 @@ async def _run(args: argparse.Namespace) -> int:
                         print(f"[T2b] first stage-0 logprob = {getattr(first, 'logprob', first)!r}")
             elif stage_id == 1:
                 mm = omni_out.multimodal_output or {}
-                audio = mm.get("audio") or mm.get("waveform")
+                audio = mm.get("audio")
+                if audio is None:
+                    audio = mm.get("waveform")
                 if audio is not None:
                     arr = np.asarray(audio[0] if isinstance(audio, list) else audio)
                     if arr.size > 0:
