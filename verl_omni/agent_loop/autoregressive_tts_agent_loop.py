@@ -498,31 +498,17 @@ class AutoRegressiveTTSAgentLoopWorker:
                 info = result.get("reward_extra_info", {})
                 successes.append(bool(info.get("success", True)))
                 transcripts.append(str(info.get("transcript", "")))
-                # Visibility log so the operator can eyeball the ASR-driven
-                # reward per completion as the rollout proceeds. Use a bare
-                # ``print`` (not ``logger``) because verl-omni's module
-                # logger defaults to WARN (``VERL_LOGGING_LEVEL`` env var)
-                # and Ray's actor log forwarder relays stdout to the
-                # driver process — Ray prefixes the line with
-                # ``(AutoRegressiveTTSAgentLoopWorker pid=...)`` so it is
-                # trivial to grep out of the main trainer log. Tagged
-                # ``[T14-reward]`` for greppability.
-                _hyp_preview = (transcripts[-1] or "")[:40].replace("\n", " ")
-                _cer = info.get("cer")
-                _dp = info.get("duration_penalty")
-                _cer_str = f"{_cer:.4f}" if isinstance(_cer, (int, float)) else str(_cer)
-                _dp_str = f"{_dp:.4f}" if isinstance(_dp, (int, float)) else str(_dp)
-                # Dump the synthesized waveform so we can audibly check
-                # the rollout. ``T14_DUMP_ROLLOUT_WAVS`` overrides the
-                # default repo-root ``logs/wavs/`` location; set to an
-                # empty string to disable.
-                _dump_dir = os.environ.get("T14_DUMP_ROLLOUT_WAVS", "logs/wavs")
+                # Optional per-completion wav dump for offline inspection.
+                # Disabled by default; set
+                # ``QWEN3_TTS_ROLLOUT_WAV_DIR=/path/to/dir`` to enable.
+                # Filenames are ``<YYYYMMDD-HHMMSS>_s<idx>_r<reward>_<prompt>.wav``
+                # so listing the directory shows the reward distribution
+                # at a glance and wav file size approximates duration.
+                _dump_dir = os.environ.get("QWEN3_TTS_ROLLOUT_WAV_DIR", "")
                 if _dump_dir and completion.waveform is not None:
                     try:
                         import soundfile as _sf
                         import time as _time
-                        # Sanitize prompt prefix for use in a filename
-                        # (keep Chinese chars; only strip path-sensitive ascii).
                         _safe_prompt = "".join(
                             c for c in output.prompt_text[:24]
                             if c not in "/\\:\0\n\r\t<>|*?\""
@@ -554,14 +540,6 @@ class AutoRegressiveTTSAgentLoopWorker:
                     except Exception as exc:
                         # Don't let dump failures break the trainer.
                         logger.warning("Failed to dump rollout wav: %s", exc)
-
-                print(
-                    f"[T14-reward] sample={int(completion.sample_index)} "
-                    f"prompt={output.prompt_text[:40]!r} "
-                    f"hyp={_hyp_preview!r} reward={scores[-1]:.4f} "
-                    f"cer={_cer_str} dp={_dp_str} ok={successes[-1]}",
-                    flush=True,
-                )
                 # Preserve the reward-manager breakdown so validation logging
                 # can emit per-step mean_cer / mean_duration_penalty etc.
                 cer_value = info.get("cer")

@@ -69,23 +69,6 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         )
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
-        # Diagnostic toggle (BL-20260518-fsdp-vllm-sync-suspect): standalone
-        # vllm-omni with ``.hf_cache`` weights synthesizes correct Chinese
-        # audio (CER=0.0000); production verl-omni with FSDP→vLLM-synced
-        # weights produces all-NaN rewards. To isolate whether the FSDP
-        # sync itself corrupts the codec emission, set
-        # ``QWEN3_TTS_SKIP_FSDP_VLLM_SYNC=1`` to make this method a no-op
-        # so the rollout permanently uses the ``.hf_cache`` weights. The
-        # actor still trains, but the rollout is effectively frozen —
-        # only useful as a diagnostic to bisect the failure source.
-        if os.environ.get("QWEN3_TTS_SKIP_FSDP_VLLM_SYNC", "0") == "1":
-            n_pushed = sum(1 for _ in weights) if isinstance(weights, list) else 0
-            logger.info(
-                "Qwen3-TTS FSDP→vLLM sync SKIPPED via env "
-                "QWEN3_TTS_SKIP_FSDP_VLLM_SYNC=1 (would have pushed %d weights)",
-                n_pushed,
-            )
-            return
         if peft_config and base_sync_done:
             weights = dict(weights)
             lora_request = OmniTensorLoRARequest(
