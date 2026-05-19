@@ -49,13 +49,15 @@ PROMPTS = (
 )
 
 
-def make(out_dir: Path, split: str, wav: str, duration: float, language: str) -> None:
+def make(
+    out_dir: Path, split: str, wav: str, duration: float, language: str, ref_text: str,
+) -> None:
     rows = []
     for i, txt in enumerate(PROMPTS):
         rows.append(dict(
             prompt_text=txt,
             ref_audio=wav,
-            ref_text="一段参考音频。",
+            ref_text=ref_text,
             speaker_id=f"spk_{i % 2}",
             ref_utt_id=f"ref_{split}_{i:03d}",
             target_utt_id=f"tgt_{split}_{i:03d}",
@@ -74,8 +76,16 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--ref-audio",
-        default="/lustre/fsw/portfolios/coreai/users/yuekaiz/tts/wavs/r12_baseline.wav",
-        help="Path to a real wav file used as the voice-cloning reference.",
+        default="/tmp/aishell_real/aishell_cuts_dev.00000000/BAC/BAC009S0739W0269-7441.wav",
+        help="Path to a real wav file used as the voice-cloning reference. "
+             "Defaults to an AISHELL dev cut (5.4s Chinese male) — make sure "
+             "the file is extracted via the aishell prep helper before "
+             "running, otherwise the TTS model has no speaker to clone.",
+    )
+    parser.add_argument(
+        "--ref-text",
+        default="索尼昨日发布了一个好消息和一个坏消息。",
+        help="Transcript of --ref-audio. Should match the AISHELL cut metadata.",
     )
     parser.add_argument(
         "--out-dir", default="/tmp/aishell_one",
@@ -98,8 +108,8 @@ def main() -> int:
     duration = float(len(data) / sr)
     print(f"ref_audio={args.ref_audio} sr={sr} dur={duration:.2f}s")
 
-    make(out_dir, "train", args.ref_audio, duration, args.language)
-    make(out_dir, "eval", args.ref_audio, duration, args.language)
+    make(out_dir, "train", args.ref_audio, duration, args.language, args.ref_text)
+    make(out_dir, "eval", args.ref_audio, duration, args.language, args.ref_text)
     return 0
 
 
