@@ -149,6 +149,23 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
         prompt_text = str(kwargs["prompt_text"])
         ref_audio = kwargs["ref_audio"]
         ref_text = str(kwargs["ref_text"])
+        # Optional per-row language hint. Qwen3-TTS Base mode uses this to
+        # decide the synthesis language (``"Chinese"``/``"English"``/``"Auto"``);
+        # without it the model picks whatever the prefill happens to encode,
+        # which on the 0.6B Base ckpt yields essentially-empty audio for
+        # Chinese prompts. The dataset advertises ``language`` as an
+        # optional column — when absent we pass ``None`` and the
+        # rollout server omits the field entirely so the model falls
+        # back to its default. Coerce non-string values (numpy scalar,
+        # None) defensively because ``DataProto`` returns numpy arrays
+        # for non-tensor columns.
+        raw_language = kwargs.get("language")
+        if raw_language is None:
+            language: str | None = None
+        else:
+            language = str(raw_language)
+            if not language or language.lower() in {"none", "nan"}:
+                language = None
         n = int(sampling_params.get("n", 2))
 
         metrics: dict[str, Any] = {}
@@ -160,6 +177,7 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
                 ref_text=ref_text,
                 sampling_params=sampling_params,
                 n=n,
+                language=language,
             )
 
         if metrics.get("num_preempted") is None:
@@ -179,6 +197,7 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
             "target_duration": float(kwargs.get("target_duration") or 0.0),
             "target_audio": kwargs.get("target_audio"),
             "data_source": kwargs.get("data_source"),
+            "language": language,
             "stop_reason": output.stop_reason,
             "sample_rate": output.sample_rate,
         }
@@ -464,6 +483,27 @@ class AutoRegressiveTTSAgentLoopWorker:
                 info = result.get("reward_extra_info", {})
                 successes.append(bool(info.get("success", True)))
                 transcripts.append(str(info.get("transcript", "")))
+                # Visibility log so the operator can eyeball the ASR-driven
+                # reward per completion as the rollout proceeds. Use a bare
+                # ``print`` (not ``logger``) because verl-omni's module
+                # logger defaults to WARN (``VERL_LOGGING_LEVEL`` env var)
+                # and Ray's actor log forwarder relays stdout to the
+                # driver process — Ray prefixes the line with
+                # ``(AutoRegressiveTTSAgentLoopWorker pid=...)`` so it is
+                # trivial to grep out of the main trainer log. Tagged
+                # ``[T14-reward]`` for greppability.
+                _hyp_preview = (transcripts[-1] or "")[:40].replace("\n", " ")
+                _cer = info.get("cer")
+                _dp = info.get("duration_penalty")
+                _cer_str = f"{_cer:.4f}" if isinstance(_cer, (int, float)) else str(_cer)
+                _dp_str = f"{_dp:.4f}" if isinstance(_dp, (int, float)) else str(_dp)
+                print(
+                    f"[T14-reward] sample={int(completion.sample_index)} "
+                    f"prompt={output.prompt_text[:40]!r} "
+                    f"hyp={_hyp_preview!r} reward={scores[-1]:.4f} "
+                    f"cer={_cer_str} dp={_dp_str} ok={successes[-1]}",
+                    flush=True,
+                )
                 # Preserve the reward-manager breakdown so validation logging
                 # can emit per-step mean_cer / mean_duration_penalty etc.
                 cer_value = info.get("cer")

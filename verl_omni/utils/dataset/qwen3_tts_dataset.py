@@ -43,7 +43,20 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "data_source",
 )
 
-OPTIONAL_COLUMNS: tuple[str, ...] = ("target_audio",)
+OPTIONAL_COLUMNS: tuple[str, ...] = (
+    "target_audio",
+    # Per-row language hint for Qwen3-TTS Base mode. Threaded through the
+    # agent loop into ``additional_information["language"]`` so the
+    # vllm-omni stage_input_processor surfaces it as
+    # ``runtime_additional_information`` to the talker (see
+    # ``.venv/.../vllm_omni/model_executor/stage_input_processors/
+    # qwen3_tts.py`` + ``tts_utils.py``). Expected values:
+    # ``"Chinese"``, ``"English"``, ``"Auto"`` (see
+    # ``Qwen3-TTS/examples/test_model_12hz_base.py``). When the column is
+    # absent or null, the agent loop omits the field and the model uses
+    # its default.
+    "language",
+)
 
 
 class Qwen3TTSDataset(Dataset):

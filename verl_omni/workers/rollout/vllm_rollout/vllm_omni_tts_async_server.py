@@ -155,6 +155,7 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
         request_id: str | None = None,
         n: int | None = None,
         task_type: str = "Base",
+        language: str | None = None,
     ) -> AudioRolloutOutput:
         """Sample ``n>=2`` speech-token sequences for one ``(prompt_text, ref_audio, ref_text)`` triple.
 
@@ -193,6 +194,21 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
             "ref_text":  [ref_text],
             "task_type": [task_type],
         }
+        # vllm-omni's Qwen3-TTS stage_input_processor reads
+        # ``additional_information["language"]`` via
+        # ``extract_language_from_prompt`` /
+        # ``extract_language_from_request`` (see
+        # ``.venv/.../vllm_omni/model_executor/stage_input_processors/
+        # tts_utils.py``) and propagates it as
+        # ``runtime_additional_information`` to the talker so the model
+        # knows which language to synthesise. Qwen3-TTS expects values
+        # like ``"Chinese"``, ``"English"``, ``"Auto"`` (see
+        # ``Qwen3-TTS/examples/test_model_12hz_base.py``). Omit the key
+        # entirely when ``language is None`` so this stays
+        # backwards-compatible with stage configs / datasets that don't
+        # provide one.
+        if language is not None:
+            additional_information["language"] = [language]
         custom_prompt = {
             "prompt": prompt_text,
             "additional_information": additional_information,
@@ -287,17 +303,58 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
                     if audio is None:
                         # Some configs surface the waveform under 'waveform'.
                         audio = mm.get("waveform")
-                    sr = mm.get("sample_rate")
-                    if sr is not None:
-                        sample_rate = int(sr)
-                    # When stage 1 batches audio across the n samples, treat the
-                    # whole multimodal_output as a list-of-waveforms; otherwise
-                    # store it under index 0 and rely on stage-0 grouping.
-                    if isinstance(audio, list):
-                        for i, wav in enumerate(audio):
-                            stage1[i] = wav
-                    else:
-                        stage1[0] = audio
+                    if audio is None and isinstance(mm, dict):
+                        # qwen3_tts code2wav writes the payload under
+                        # ``model_outputs`` (see
+                        # ``vllm_omni/model_executor/models/qwen3_tts/
+                        # qwen3_tts_code2wav.py``); fall back to that
+                        # key when the cosyvoice-style ``audio`` alias
+                        # is absent.
+                        audio = mm.get("model_outputs")
+                    # Sample rate can appear under either ``sample_rate``
+                    # or ``sr`` and may be a scalar tensor / list.
+                    sr_raw = mm.get("sample_rate") if isinstance(mm, dict) else None
+                    if sr_raw is None and isinstance(mm, dict):
+                        sr_raw = mm.get("sr")
+                    if isinstance(sr_raw, list) and sr_raw:
+                        sr_raw = sr_raw[0]
+                    if hasattr(sr_raw, "item"):
+                        try:
+                            sr_raw = int(sr_raw.item())
+                        except Exception:
+                            sr_raw = None
+                    if sr_raw is not None:
+                        sample_rate = int(sr_raw)
+                    # vllm-omni's qwen3_tts stage_config uses
+                    # ``codec_streaming: true`` so stage 1 emits the
+                    # audio one chunk at a time as a *cumulative* list:
+                    # event 1 carries ``[chunk0]``, event 2 carries
+                    # ``[chunk0, chunk1]``, …, event N carries
+                    # ``[chunk0, … chunkN-1]``. Each chunk is a 1-D
+                    # waveform tensor (e.g. 3840 samples at 24 kHz =
+                    # 0.16 s for ``codec_chunk_frames: 25``). The
+                    # original implementation here treated ``audio[i]``
+                    # as the audio for the n-group's i-th completion
+                    # and overwrote ``stage1[0] = audio`` on the
+                    # non-list branch, both of which silently dropped
+                    # ~99% of the synthesized waveform. The corrected
+                    # logic concatenates the cumulative list each event
+                    # and stores it under index 0; the orchestrator
+                    # currently emits stage-1 audio for a single
+                    # sample_index per ``generate`` call, so all n
+                    # stage-0 codec sequences end up joined to the same
+                    # waveform during ``stage1.get(index, stage1.get(0))``
+                    # below.
+                    import numpy as _np  # local import to avoid touching the top-level import order
+                    if isinstance(audio, list) and audio:
+                        chunks = [_np.asarray(a) for a in audio if a is not None]
+                        chunks = [c for c in chunks if c.size > 0]
+                        if chunks:
+                            stage1[0] = _np.concatenate(chunks)
+                    elif audio is not None:
+                        wav_np = _np.asarray(audio)
+                        if wav_np.size > 0:
+                            stage1[0] = wav_np
                 # Capture finish/preemption metadata from the last stage.
                 req_output = omni_out.request_output
                 fr = getattr(req_output, "finish_reason", None)

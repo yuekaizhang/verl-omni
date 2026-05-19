@@ -46,6 +46,7 @@ class AutoRegressiveTTSServerClient(LLMServerClient):
         sampling_params: dict[str, Any],
         n: int,
         task_type: str = "Base",
+        language: str | None = None,
     ) -> Any:
         """Acquire a server, call ``generate_tts`` on it, release the server.
 
@@ -62,6 +63,7 @@ class AutoRegressiveTTSServerClient(LLMServerClient):
                 request_id=uuid4().hex,
                 n=n,
                 task_type=task_type,
+                language=language,
             )
         finally:
             self._release_server(server_id)
