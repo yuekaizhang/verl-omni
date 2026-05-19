@@ -64,7 +64,7 @@ load_format: auto
 # forwarded by the AR-TTS adapter via ``engine_kwargs`` instead — adding
 # them at the top level raises
 # ``TypeError: RolloutConfig.__init__() got an unexpected keyword``.
-temperature: 0.9
+temperature: 1.0
 top_p: 1.0
 top_k: 50
 repetition_penalty: 1.05

@@ -512,6 +512,49 @@ class AutoRegressiveTTSAgentLoopWorker:
                 _dp = info.get("duration_penalty")
                 _cer_str = f"{_cer:.4f}" if isinstance(_cer, (int, float)) else str(_cer)
                 _dp_str = f"{_dp:.4f}" if isinstance(_dp, (int, float)) else str(_dp)
+                # Dump the synthesized waveform so we can audibly check
+                # the rollout. ``T14_DUMP_ROLLOUT_WAVS`` overrides the
+                # default repo-root ``logs/wavs/`` location; set to an
+                # empty string to disable.
+                _dump_dir = os.environ.get("T14_DUMP_ROLLOUT_WAVS", "logs/wavs")
+                if _dump_dir and completion.waveform is not None:
+                    try:
+                        import soundfile as _sf
+                        import time as _time
+                        # Sanitize prompt prefix for use in a filename
+                        # (keep Chinese chars; only strip path-sensitive ascii).
+                        _safe_prompt = "".join(
+                            c for c in output.prompt_text[:24]
+                            if c not in "/\\:\0\n\r\t<>|*?\""
+                        ).strip().replace(" ", "_") or "prompt"
+                        _ts = _time.strftime("%Y%m%d-%H%M%S")
+                        _reward_tag = (
+                            "nan" if not math.isfinite(scores[-1])
+                            else f"r{scores[-1]:+.2f}"
+                        )
+                        _fname = (
+                            f"{_ts}_s{int(completion.sample_index)}_"
+                            f"{_reward_tag}_{_safe_prompt}.wav"
+                        )
+                        os.makedirs(_dump_dir, exist_ok=True)
+                        _wav_arr = np.asarray(completion.waveform)
+                        if _wav_arr.dtype.kind == "O":
+                            _wav_arr = np.asarray(
+                                _wav_arr.item() if _wav_arr.shape == () else _wav_arr[0]
+                            )
+                        if _wav_arr.dtype not in (np.float32, np.float64, np.int16, np.int32):
+                            _wav_arr = _wav_arr.astype(np.float32)
+                        _sf.write(
+                            os.path.join(_dump_dir, _fname),
+                            _wav_arr,
+                            int(output.sample_rate),
+                            format="WAV",
+                            subtype="PCM_16",
+                        )
+                    except Exception as exc:
+                        # Don't let dump failures break the trainer.
+                        logger.warning("Failed to dump rollout wav: %s", exc)
+
                 print(
                     f"[T14-reward] sample={int(completion.sample_index)} "
                     f"prompt={output.prompt_text[:40]!r} "
