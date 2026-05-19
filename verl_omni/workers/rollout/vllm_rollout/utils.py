@@ -69,6 +69,23 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         )
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
+        # Diagnostic toggle (BL-20260518-fsdp-vllm-sync-suspect): standalone
+        # vllm-omni with ``.hf_cache`` weights synthesizes correct Chinese
+        # audio (CER=0.0000); production verl-omni with FSDP→vLLM-synced
+        # weights produces all-NaN rewards. To isolate whether the FSDP
+        # sync itself corrupts the codec emission, set
+        # ``QWEN3_TTS_SKIP_FSDP_VLLM_SYNC=1`` to make this method a no-op
+        # so the rollout permanently uses the ``.hf_cache`` weights. The
+        # actor still trains, but the rollout is effectively frozen —
+        # only useful as a diagnostic to bisect the failure source.
+        if os.environ.get("QWEN3_TTS_SKIP_FSDP_VLLM_SYNC", "0") == "1":
+            n_pushed = sum(1 for _ in weights) if isinstance(weights, list) else 0
+            logger.info(
+                "Qwen3-TTS FSDP→vLLM sync SKIPPED via env "
+                "QWEN3_TTS_SKIP_FSDP_VLLM_SYNC=1 (would have pushed %d weights)",
+                n_pushed,
+            )
+            return
         if peft_config and base_sync_done:
             weights = dict(weights)
             lora_request = OmniTensorLoRARequest(
@@ -115,20 +132,43 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             # speaker embedding — it's read-only relative to the policy
             # being trained, so we can safely skip its weights on every
             # call after the first.
-            seen_speaker = getattr(self, "_qwen3_tts_speaker_encoder_synced", False)
-            if seen_speaker:
-                stage0_weights = [
-                    (n, t) for (n, t) in weights
-                    if not n.startswith("speaker_encoder.")
-                ]
-            else:
-                stage0_weights = list(weights)
-                self._qwen3_tts_speaker_encoder_synced = True
+            # Always drop ``speaker_encoder.*`` from FSDP→vLLM syncs.
+            #
+            # Two reasons together force this:
+            #
+            # 1. With ``rollout.load_format=auto`` (set in
+            #    qwen3_tts_rollout.yaml so the codec_embedding /
+            #    code_predictor heads receive real values at engine
+            #    init, not random ``dummy`` tensors), vllm-omni's
+            #    ``Qwen3TTSTalkerForConditionalGeneration.load_weights``
+            #    already lazy-builds and loads ``self.speaker_encoder``
+            #    during the safetensors checkpoint load. The talker's
+            #    AutoWeightsLoader can't reload weights into the
+            #    already-built submodule on subsequent syncs (raises
+            #    ``ValueError: There is no module or parameter named
+            #    'speaker_encoder.blocks.0.conv.weight' ... available
+            #    parameters belonging to ... (Conv1d) are: set()``).
+            #
+            # 2. The speaker_encoder takes a *reference audio* and
+            #    produces a speaker embedding — it is read-only
+            #    relative to the policy being trained, so we don't
+            #    actually need to refresh its weights from the actor.
+            #
+            # When ``load_format=dummy`` was the default and the
+            # initial load skipped speaker_encoder.*, we used to push
+            # them on the FIRST sync (lazy-built then) and skip
+            # afterwards. With ``load_format=auto`` that first push
+            # also fails because the submodule is already built. The
+            # simpler invariant is: always skip.
+            stage0_weights = [
+                (n, t) for (n, t) in weights
+                if not n.startswith("speaker_encoder.")
+            ]
             logger.info(
                 "Qwen3-TTS FSDP→vLLM sync: forwarding %d weights "
-                "(speaker_encoder %s)",
+                "(speaker_encoder always skipped — preloaded via "
+                "load_format=auto)",
                 len(stage0_weights),
-                "skipped (already synced)" if seen_speaker else "included (first sync)",
             )
 
             # vllm-omni 0.18 renamed worker.load_weights -> worker.reload_weights

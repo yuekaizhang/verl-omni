@@ -403,13 +403,16 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
 
         if n is None or not isinstance(n, int):
             raise ValueError(
-                f"generate_tts requires an integer n>=2 (got n={n!r}). "
-                "Group size is mandatory for GRPO; pass it explicitly."
+                f"generate_tts requires an integer n>=1 (got n={n!r}). "
+                "Pass it explicitly."
             )
-        if n < 2:
+        if n < 1:
             raise ValueError(
-                f"generate_tts requires n>=2 for group-relative GRPO sampling (got n={n}). "
-                "A single sample cannot form a group."
+                f"generate_tts requires n>=1 (got n={n}). When the caller "
+                "(verl's ``ray_trainer.fit``) already pre-expands the input "
+                "batch by ``rollout.n`` via ``batch.repeat(repeat_times=n)``, "
+                "each agent_loop call should request n=1 here so the output "
+                "cardinality matches the pre-expanded batch."
             )
 
         request_id = request_id or uuid4().hex

@@ -166,7 +166,22 @@ class AutoRegressiveTTSSingleTurnAgentLoop(AgentLoopBase):
             language = str(raw_language)
             if not language or language.lower() in {"none", "nan"}:
                 language = None
-        n = int(sampling_params.get("n", 2))
+        # Verl's ``ray_trainer.fit`` repeats the input batch by
+        # ``actor_rollout_ref.rollout.n`` *before* calling
+        # ``AgentLoopManager.generate_sequences`` (see
+        # ``ray_trainer.py:1404``: ``batch = batch.repeat(repeat_times=n,
+        # interleave=True)``). Each repeated row gets its own agent_loop
+        # call, so this method must emit exactly *one* completion — the
+        # union of ``gen_batch_output`` and the expanded ``batch`` only
+        # matches at ``batch_size = rows × rollout.n`` when each call
+        # yields one rollout. The previous code (which inherited a
+        # mandatory ``n>=2``) accidentally produced one completion per
+        # call only because vllm-omni's orchestrator collapsed
+        # ``SamplingParams.n>1`` (parent_req=None hardcoding); now that
+        # ``generate_tts`` issues n sequential sub-requests internally,
+        # explicitly forcing ``n=1`` here keeps the output cardinality
+        # correct.
+        n = 1
 
         metrics: dict[str, Any] = {}
         with simple_timer("generate_sequences", metrics):

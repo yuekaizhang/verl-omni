@@ -25,6 +25,34 @@ n: 4
 # the number of visible devices (1)``. Force TP=1.
 tensor_model_parallel_size: 1
 
+# Initialise the rollout engine from the .hf_cache checkpoint
+# (``auto``), NOT the upstream default ``dummy`` (random weights).
+#
+# Qwen3-TTS's talker lazily builds ``self.speaker_encoder`` only when
+# ``load_weights`` sees a ``speaker_encoder.*`` key (see
+# ``qwen3_tts_talker.py:1574-1577``). With ``load_format=dummy`` no
+# weights are streamed through that load path during engine init —
+# the talker module is constructed without speaker_encoder, all
+# params hold random tensors, and the model_executor does not see
+# any ``speaker_encoder.*`` keys.
+#
+# The first FSDP→vLLM weight sync would normally remedy this by
+# pushing the actor's ``speaker_encoder.*`` weights, but if any
+# weight subset (e.g. ``code_predictor.codec_embedding`` or
+# ``code_predictor.lm_head`` ModuleLists) is silently dropped by the
+# FSDP unshard / mapper pipeline, those layers stay at the random
+# ``dummy`` init forever — which surfaces as ``Code2Wav input_ids
+# length 1 not divisible by num_quantizers 16`` warnings (the
+# code_predictor emits garbage residual codes whose count isn't a
+# multiple of the 16-quantizer frame size) and ``ok=False``
+# transcripts across the entire batch.
+#
+# ``load_format=auto`` makes vLLM read the safetensors directly so
+# every param has its checkpoint value at engine-init time;
+# subsequent FSDP syncs then *update* whatever they cover without
+# leaving any layer at random init.
+load_format: auto
+
 # AR sampling knobs forwarded into vllm.SamplingParams by the AR-TTS
 # AgentLoop. Only fields present on upstream verl's RolloutConfig
 # dataclass go at the top level here — see
