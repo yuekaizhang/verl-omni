@@ -26,4 +26,20 @@ if _ROLLOUT_REGISTRY is not None:
         "verl.workers.rollout.vllm_rollout.ServerAdapter"
     )
 
-__all__: list[str] = []
+# Re-export rollout-adapter helpers so consumers (recipe trainer +
+# agent loop) can import them from this package directly.
+from .vllm_omni_rollout_adapter import (  # noqa: E402, F401
+    ALGORITHM,
+    ARCHITECTURE,
+    ROLLOUT_REPLICA_NAME,
+    apply_diagnostic_logprobs_to_batch,
+    get_stage_config_path,
+)
+
+__all__ = [
+    "ALGORITHM",
+    "ARCHITECTURE",
+    "ROLLOUT_REPLICA_NAME",
+    "apply_diagnostic_logprobs_to_batch",
+    "get_stage_config_path",
+]

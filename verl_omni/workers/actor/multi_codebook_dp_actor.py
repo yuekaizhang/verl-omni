@@ -29,13 +29,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tensordict import TensorDict
 
-from verl_omni.models.multi_codebook_tts.base import (
-    MultiCodebookForwardOutput,
-    MultiCodebookTTSModel,
-    get_adapter,
-)
+# `tensordict` and the adapter registry are imported lazily inside the
+# methods that need them. Keeping the top-level imports torch-only lets
+# the math helpers below (`_gather_log_probs_*`, `_build_cb_rest_mask`,
+# `_prefix_metrics`) be unit-tested on a Python install that has torch
+# but not tensordict / verl.
 
 
 @dataclass
@@ -190,6 +189,11 @@ class MultiCodebookDPActor:
     """
 
     def __init__(self, config: MultiCodebookActorConfig) -> None:
+        from verl_omni.models.multi_codebook_tts.base import (
+            MultiCodebookTTSModel,
+            get_adapter,
+        )
+
         self.config = config
         self.adapter: MultiCodebookTTSModel = get_adapter(config.model_name)
 
@@ -201,9 +205,9 @@ class MultiCodebookDPActor:
     @torch.no_grad()
     def compute_log_prob(
         self,
-        data: TensorDict,
+        data,
         model: nn.Module,
-    ) -> TensorDict:
+    ):
         """Recompute per-stream log-probs from the rollout sequences.
 
         Required `data` fields:
@@ -221,7 +225,9 @@ class MultiCodebookDPActor:
 
         The legacy unified `old_log_probs` field is intentionally absent.
         """
-        out: MultiCodebookForwardOutput = self.adapter.forward_training(
+        from tensordict import TensorDict
+
+        out = self.adapter.forward_training(
             model=model,
             input_ids=data["input_ids"],
             codec_ids=data["codec_ids"],
@@ -258,7 +264,7 @@ class MultiCodebookDPActor:
 
     def update_policy(
         self,
-        data: TensorDict,
+        data,
         model: nn.Module,
     ) -> dict[str, Any]:
         """Compute the multi-codebook PPO loss and return scalar loss +
@@ -289,7 +295,7 @@ class MultiCodebookDPActor:
         N_residual = N - 1
 
         # Forward through the current policy (gradients enabled).
-        out: MultiCodebookForwardOutput = self.adapter.forward_training(
+        out = self.adapter.forward_training(
             model=model,
             input_ids=data["input_ids"],
             codec_ids=codec_ids,
