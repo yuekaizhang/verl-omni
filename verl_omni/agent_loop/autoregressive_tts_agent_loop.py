@@ -588,6 +588,7 @@ class AutoRegressiveTTSAgentLoopWorker:
 
         rows_per_sample_prompt: list[torch.Tensor] = []
         rows_per_sample_response: list[torch.Tensor] = []
+        rows_per_sample_codec_ids: list[torch.Tensor] = []  # [response_pad, N] per row
         rows_per_sample_logprobs: list[torch.Tensor] = []
         rows_per_sample_attention: list[torch.Tensor] = []
         rows_non_tensor: dict[str, list[Any]] = {
@@ -638,8 +639,22 @@ class AutoRegressiveTTSAgentLoopWorker:
             )
             for i, completion in enumerate(output.completions):
                 rows_per_sample_prompt.append(prompt_t)
-                resp_t = self._pad_1d(list(completion.codec_tokens), response_pad, pad_value=0)
+                # `completion.codec_tokens` may be either:
+                #   - a flat list `[T]` (legacy cb0-only path; the
+                #     rollout server's `_generate_one_tts_sample` historically
+                #     surfaced only cb0), or
+                #   - a list of `[T, N]` (multi-codebook path; the vLLM-Omni
+                #     Qwen3-TTS talker actually samples all N codebooks but
+                #     downstream historically flattened to cb0).
+                # `_extract_codec_2d` normalises both into a `[T, N]` Python
+                # nested list. `_pad_2d_codec` then produces a `[response_pad,
+                # N]` tensor; `[:, 0]` gives the cb0 1D response tensor the
+                # legacy single-codebook code path expects.
+                codec_2d = self._extract_codec_2d(completion.codec_tokens)
+                codec_2d_t = self._pad_2d_codec(codec_2d, response_pad, pad_value=0)
+                resp_t = codec_2d_t[:, 0].contiguous()  # cb0 view (legacy `responses`).
                 rows_per_sample_response.append(resp_t)
+                rows_per_sample_codec_ids.append(codec_2d_t)
                 logp_t = self._pad_1d_float(list(completion.logprobs), response_pad, pad_value=0.0)
                 rows_per_sample_logprobs.append(logp_t)
                 response_mask = (resp_t != 0).long()
@@ -671,6 +686,11 @@ class AutoRegressiveTTSAgentLoopWorker:
 
         prompts_t = torch.stack(rows_per_sample_prompt, dim=0)
         responses_t = torch.stack(rows_per_sample_response, dim=0)
+        # Structured `codec_ids` tensor `[B, response_pad, N]`. The new
+        # `MultiCodebookDPActor.compute_log_prob` reads this; legacy
+        # single-codebook code paths continue to read `responses` (which
+        # is `codec_ids[..., 0]`).
+        codec_ids_t = torch.stack(rows_per_sample_codec_ids, dim=0)
         logprobs_t = torch.stack(rows_per_sample_logprobs, dim=0)
         attention_t = torch.stack(rows_per_sample_attention, dim=0)
         rm_scores = torch.tensor(per_sample_rewards, dtype=torch.float32).unsqueeze(-1)
@@ -714,6 +734,7 @@ class AutoRegressiveTTSAgentLoopWorker:
             {
                 "prompts": prompts_t,
                 "responses": responses_t,
+                "codec_ids": codec_ids_t,
                 "rollout_log_probs": logprobs_t,
                 "attention_mask": attention_t,
                 "response_mask": response_mask_t,
@@ -756,6 +777,44 @@ class AutoRegressiveTTSAgentLoopWorker:
             return torch.tensor(values[:length], dtype=torch.long)
         out = torch.full((length,), pad_value, dtype=torch.long)
         out[: len(values)] = torch.tensor(values, dtype=torch.long)
+        return out
+
+    @staticmethod
+    def _extract_codec_2d(codec_tokens) -> list[list[int]]:
+        """Normalise `completion.codec_tokens` into a `[T, N]` nested list.
+
+        Accepts either a flat `list[int]` (legacy cb0-only payload) or a
+        `list[list[int]]` (multi-codebook payload). Flat input is widened
+        to `[T, 1]`. Returns a plain Python nested list (no torch
+        allocation; that happens in `_pad_2d_codec`)."""
+        codec_list = list(codec_tokens) if codec_tokens else []
+        if not codec_list:
+            return []
+        if isinstance(codec_list[0], (list, tuple)):
+            return [list(row) for row in codec_list]
+        # Flat list -> treat as cb0-only [T, 1].
+        return [[int(v)] for v in codec_list]
+
+    @staticmethod
+    def _pad_2d_codec(values: list[list[int]], length: int, pad_value: int) -> torch.Tensor:
+        """Pad a `[T, N]` codec frame list to `[length, N]` along time."""
+        if not values:
+            return torch.full((length, 1), pad_value, dtype=torch.long)
+        num_codebooks = len(values[0])
+        # Defensive: enforce uniform N across frames (the rollout server
+        # produces uniform N=num_code_groups; mismatched rows would indicate
+        # a serialization bug worth surfacing).
+        for t, row in enumerate(values):
+            if len(row) != num_codebooks:
+                raise ValueError(
+                    f"AR-TTS agent loop: codec frame {t} has {len(row)} "
+                    f"codebooks but frame 0 has {num_codebooks}. The "
+                    f"rollout payload must emit a uniform [T, N] layout."
+                )
+        out = torch.full((length, num_codebooks), pad_value, dtype=torch.long)
+        clipped = values[:length]
+        if clipped:
+            out[: len(clipped), :] = torch.tensor(clipped, dtype=torch.long)
         return out
 
     @staticmethod
