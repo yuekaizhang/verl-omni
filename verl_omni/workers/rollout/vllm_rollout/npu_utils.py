@@ -176,3 +176,19 @@ class NPUColocateWorkerMixin:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         return True
+
+
+# vllm 0.20.2 worker_base.py:263 asserts that a worker-extension class does NOT
+# override any attribute already defined on the underlying worker. vllm-omni
+# c7178d89's ``vllm_omni/worker/base.py`` introduced
+# ``_maybe_get_memory_pool_context`` / ``sleep`` / ``wake_up`` on the base
+# worker. On CUDA, ``NPUColocateWorkerMixin`` only delegates to ``super()``
+# for these — keep the *names* on the mixin and the worker-extension class
+# would fail the assertion at startup ("attribute conflicts with the worker
+# extension class"). Strip the NPU-only methods from the mixin on non-NPU so
+# the extension cleanly inherits the base worker's implementations.
+if not _is_npu_platform():
+    for _attr in ("_maybe_get_memory_pool_context", "sleep", "wake_up"):
+        if _attr in NPUColocateWorkerMixin.__dict__:
+            delattr(NPUColocateWorkerMixin, _attr)
+    del _attr

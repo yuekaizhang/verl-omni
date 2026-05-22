@@ -98,7 +98,7 @@ critic:
   enable: false
 
 trainer:
-  project_name: verl_omni_qwen3_tts_grpo
+  project_name: qwen3-tts-verl-omni
   experiment_name: qwen3_tts_grpo_smoke
   total_training_steps: 3
   total_epochs: 1
@@ -111,7 +111,7 @@ trainer:
   # rollout/reward/training loop; persisting weights is out of scope.
   save_freq: -1
   test_freq: -1
-  logger: ['console']
+  logger: ['console', 'wandb']
   nnodes: 1
   # 4 train GPUs (0-3); GPU 4 reserved for the remote Qwen3-ASR server.
   # train_batch_size × rollout.n (4 × 4 = 16) must be divisible by

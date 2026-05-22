@@ -8,7 +8,7 @@
 # Required env (same as run_smoke.sh):
 #   QWEN3_TTS_MODEL_PATH, QWEN3_ASR_BASE_URL, TRAIN_PARQUET, EVAL_PARQUET
 # Optional env:
-#   WANDB_PROJECT (default: verl_omni_qwen3_tts_grpo)
+#   WANDB_PROJECT (default: qwen3-tts-verl-omni)
 #   WANDB_NAME    (default: qwen3_tts_grpo_full)
 #   TOTAL_STEPS   (default: 500)
 
@@ -21,7 +21,7 @@ set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
 
-WANDB_PROJECT="${WANDB_PROJECT:-verl_omni_qwen3_tts_grpo}"
+WANDB_PROJECT="${WANDB_PROJECT:-qwen3-tts-verl-omni}"
 WANDB_NAME="${WANDB_NAME:-qwen3_tts_grpo_full}"
 TOTAL_STEPS="${TOTAL_STEPS:-500}"
 
