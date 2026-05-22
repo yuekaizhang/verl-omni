@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 @hydra.main(
-    config_path="../config/multi_codebook_tts",
-    config_name="qwen3_tts_trainer",
+    config_path="../config",
+    config_name="multi_codebook_tts/qwen3_tts_trainer",
     version_base=None,
 )
 def main(config: DictConfig) -> None:
