@@ -56,7 +56,7 @@ from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
 )
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, multi_codebook_ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -602,6 +602,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             elif model_config.get("model_type", "language_model") == "diffusion_model":
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif bool(self.config.actor.get("multi_codebook_loss", False)):
+                # Multi-codebook TTS GRPO recipe: Fish-S2-style dual-stream
+                # weighted-sum loss. See `verl_omni/workers/utils/losses.py`
+                # for the per-stream PPO + weighted-sum implementation.
+                # Activated via `actor_rollout_ref.actor.multi_codebook_loss: true`
+                # in the recipe YAML (see
+                # `verl_omni/trainer/config/multi_codebook_tts/actor/multi_codebook_actor.yaml`).
+                self.loss_fn = partial(multi_codebook_ppo_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)

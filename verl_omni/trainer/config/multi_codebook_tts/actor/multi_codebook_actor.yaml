@@ -16,6 +16,13 @@
 # weighted sum happens AFTER, so `w_cb_rest = 0.1` is NOT diluted by the
 # larger cell count of the cb_rest stream.
 
+# Gating flag: when true, `verl_omni.workers.engine_workers` dispatches
+# `self.loss_fn` to `multi_codebook_ppo_loss` instead of the upstream
+# `ppo_loss`. False keeps the legacy single-codebook path active for
+# bisection / fallback. Recipes that want the dual-stream Fish-S2 loss
+# end-to-end set this to `true` in their top-level trainer YAML.
+multi_codebook_loss: true
+
 # Fish-S2 weighted-sum coefficients (cross-check via Codex 2026-05-22:
 # `w_cb_rest` corresponds to Fish S2's `gamma` Fast-AR coefficient in
 # `L_RL = L_slow + gamma * L_fast`; the paper exposes `gamma` as a tunable
