@@ -16,7 +16,14 @@
 # weighted sum happens AFTER, so `w_cb_rest = 0.1` is NOT diluted by the
 # larger cell count of the cb_rest stream.
 
-# Fish-S2 weighted-sum coefficients.
+# Fish-S2 weighted-sum coefficients (cross-check via Codex 2026-05-22:
+# `w_cb_rest` corresponds to Fish S2's `gamma` Fast-AR coefficient in
+# `L_RL = L_slow + gamma * L_fast`; the paper exposes `gamma` as a tunable
+# knob without specifying a numeric default, so the `0.1` here is a
+# starting point, NOT a paper-backed value). Per-stream normalization
+# happens inside each `get_policy_loss_fn(...)` call BEFORE the weighted
+# sum, so `w_cb_rest = 0.1` is not diluted by the larger cell count of
+# the cb_rest stream.
 w_cb0: 1.0
 w_cb_rest: 0.1
 
