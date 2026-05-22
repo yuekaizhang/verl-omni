@@ -1,0 +1,45 @@
+# Multi-codebook actor config for the multi_codebook_tts_grpo recipe.
+#
+# Composed into `actor_rollout_ref.actor` by the parent trainer yaml's
+# `defaults:` entry. Provides:
+#
+# - Fish-S2 weighted-sum coefficients `w_cb0` / `w_cb_rest` (defaults
+#   `1.0` / `0.1` per plan §3 rationale).
+# - Per-stream policy-loss configs `cb0:` and `cb_rest:` mirroring
+#   `verl.trainer.ppo.core_algos.compute_policy_loss_vanilla`'s
+#   parameter surface, used by `MultiCodebookDPActor.update_policy` to
+#   invoke `get_policy_loss_fn(loss_mode)` once per stream.
+# - Inherits the legacy diffusion FSDP actor base (`ppo_mini_batch_size`,
+#   FSDP wrap policy, optimizer) by layering on top.
+#
+# Each stream is normalized first (per its own `loss_agg_mode`) and the
+# weighted sum happens AFTER, so `w_cb_rest = 0.1` is NOT diluted by the
+# larger cell count of the cb_rest stream.
+
+# Fish-S2 weighted-sum coefficients.
+w_cb0: 1.0
+w_cb_rest: 0.1
+
+# Per-stream policy-loss configs.
+cb0:
+  policy_loss:
+    loss_mode: vanilla
+    clip_ratio: 0.2
+  use_kl_loss: true
+  kl_loss_coef: 0.001
+  kl_loss_type: low_var_kl
+  loss_agg_mode: token-mean
+
+cb_rest:
+  policy_loss:
+    loss_mode: vanilla
+    clip_ratio: 0.2
+  use_kl_loss: true
+  kl_loss_coef: 0.001
+  kl_loss_type: low_var_kl
+  loss_agg_mode: token-mean
+
+# Inherited from the diffusion FSDP base, kept here for explicitness so
+# the smoke can size the mini-batch.
+ppo_mini_batch_size: 4
+ppo_micro_batch_size_per_gpu: 1

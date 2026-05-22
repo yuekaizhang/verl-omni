@@ -1,0 +1,47 @@
+# @package _global_
+# Multi-codebook TTS GRPO recipe — Qwen3-TTS backbone (verl-omni).
+#
+# Generic recipe parameterized by `model.name` (here: `qwen3_tts`); future
+# fish-speech support adds a sibling `fish_speech_trainer.yaml` with
+# `model.name: fish_speech` and a new adapter directory.
+#
+# Inherits the legacy `qwen3_tts/qwen3_tts_trainer.yaml` for the upstream
+# PPO base + the diffusion FSDP sub-configs (rollout / ref / reward etc.)
+# so this v1 yaml is a thin delta layered on top.
+#
+# Required overrides at launch:
+#   actor_rollout_ref.model.path=Qwen/Qwen3-TTS-12Hz-0.6B-Base
+#   data.train_files=...
+#   data.val_files=...
+#   reward.reward_model.base_url=http://<asr-host>:<port>
+
+defaults:
+
+  # Reuse the legacy qwen3_tts trainer base (composes ppo_base + diffusion
+  # FSDP overlays + rollout/ref/reward sub-configs). Deleting it is
+  # task15's job; for now this delta layers on top so the recipe works
+  # in parallel with the old path.
+  - /qwen3_tts/qwen3_tts_trainer
+
+  # New multi-codebook actor (overrides the legacy single-stream actor).
+  - /multi_codebook_tts/actor@actor_rollout_ref.actor: multi_codebook_actor
+
+  - _self_
+
+# `model.name` is the dispatch key the recipe trainer's launcher uses to
+# resolve a `MultiCodebookTTSModel` adapter from
+# `verl_omni.models.multi_codebook_tts`.
+actor_rollout_ref:
+  model:
+    name: qwen3_tts
+
+  # AC-3 gating flag: defaults OFF in v1 (the vllm-omni-verl cb_rest
+  # diagnostic logprob emission is deferred per DEC-5). When ON in a
+  # follow-up PR, the rollout adapter consumes `vllm_logprob_cb_rest`
+  # from the rollout batch and emits `vllm_drift/cb_rest` metrics.
+  rollout:
+    diagnostic_logprobs: false
+
+trainer:
+  project_name: multi-codebook-tts-grpo
+  experiment_name: qwen3_tts_grpo_smoke

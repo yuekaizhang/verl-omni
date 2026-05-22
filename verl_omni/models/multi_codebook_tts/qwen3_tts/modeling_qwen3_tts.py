@@ -1971,15 +1971,39 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
             index=frame_offsets.unsqueeze(-1).expand(-1, -1, hidden_size),
         )                                                  # [B, T_codec, H]
 
-        # 4. Flatten (B, T_codec) -> B*T_codec rows so we can run the
-        #    code_predictor once per frame across the whole batch.
-        flat_codec = codec_ids.reshape(B * T_codec, N)
+        # 4. Sanitize residual codec_ids for the code_predictor embedding
+        #    lookup. `forward_sub_talker_finetune` embeds the cb0 token at
+        #    `codec_ids[:, :1]` (via the talker embedding) and the cb1..cb_{N-2}
+        #    tokens at `codec_ids[:, 1:N-1]` (via the code_predictor's
+        #    per-codebook embeddings), and computes an unused CE loss over
+        #    `labels=codec_ids[:, 1:]`. Out-of-vocab values (e.g. a -100
+        #    sentinel or a padding `vocab_size` placeholder at a masked /
+        #    post-EOS frame) would crash the embedding lookup BEFORE the
+        #    actor's response_mask can exclude them. Clamp per-codebook to
+        #    the corresponding valid range. Masking is still the actor's
+        #    responsibility - this is only defensive clamping so the
+        #    embedding lookup stays in-bounds for masked rows.
+        cb0_vocab = int(getattr(talker_cfg, "vocab_size"))
+        code_predictor_cfg = getattr(talker_cfg, "code_predictor_config", None)
+        cb_rest_vocab = (
+            int(getattr(code_predictor_cfg, "vocab_size", cb0_vocab))
+            if code_predictor_cfg is not None
+            else cb0_vocab
+        )
+        # codec_ids layout: [..., 0] = cb0 (clamp to cb0_vocab range);
+        # [..., 1:] = cb1..cb_{N-1} (clamp to cb_rest_vocab range).
+        codec_ids_cb0 = codec_ids[..., :1].clamp(0, cb0_vocab - 1)
+        codec_ids_rest = codec_ids[..., 1:].clamp(0, cb_rest_vocab - 1)
+        codec_ids_safe = torch.cat([codec_ids_cb0, codec_ids_rest], dim=-1)
+
+        flat_codec = codec_ids_safe.reshape(B * T_codec, N)
         flat_hidden = talker_hidden_resp.reshape(B * T_codec, hidden_size)
 
         # 5. Run the code_predictor (cb_rest path). Returns
         #    `(logits[B*T, N-1, V_cb_rest], loss)`. We discard the loss
         #    (forward_sub_talker_finetune always computes it; this is a
-        #    wasted CE term, not a correctness issue).
+        #    wasted CE term, not a correctness issue - the actor's
+        #    response_mask suppresses masked positions at the loss layer).
         cb_rest_logits_flat, _ = talker.forward_sub_talker_finetune(
             flat_codec, flat_hidden,
         )

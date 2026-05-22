@@ -11,12 +11,61 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""verl_omni.pipelines package init.
 
-from . import _patch  # noqa: F401 — apply Ulysses mask fix
-from .qwen3_tts_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
+Optional subpackages (each importing diffusion deps that the TTS path
+does not need) are imported best-effort so a TTS-only worker image
+without `diffusers` can still `import verl_omni.pipelines` without
+crashing. The `_patch` Ulysses-mask shim is also gated since it
+imports `diffusers` at module load.
+"""
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(qwen3_tts_grpo.__all__)
+import logging
+from types import ModuleType
+
+_logger = logging.getLogger(__name__)
+
+__all__: list[str] = []
+
+# Best-effort: Ulysses mask fix for diffusers' Qwen-Image transformer.
+try:
+    from . import _patch  # noqa: F401 — apply Ulysses mask fix
+except ImportError as _exc:
+    _logger.debug(
+        "verl_omni.pipelines: skipping Ulysses mask patch (%s: %s); "
+        "this is expected on TTS-only environments without diffusers.",
+        type(_exc).__name__, _exc,
+    )
+
+# Diffusion recipes (require diffusers). TTS recipes do not.
+for _subpkg_name in ("qwen_image_flow_grpo", "qwen_image_mix_grpo"):
+    try:
+        _subpkg: ModuleType = __import__(
+            f"verl_omni.pipelines.{_subpkg_name}", fromlist=["__all__"],
+        )
+    except ImportError as _exc:
+        _logger.debug(
+            "verl_omni.pipelines: skipping diffusion subpackage %r (%s: %s).",
+            _subpkg_name, type(_exc).__name__, _exc,
+        )
+        continue
+    globals()[_subpkg_name] = _subpkg
+    __all__.extend(getattr(_subpkg, "__all__", []))
+
+# TTS recipes (no diffusers needed). Both the legacy qwen3_tts_grpo path
+# (deleted in task15) and the new multi_codebook_tts_grpo path are
+# imported best-effort so a partial deletion mid-migration doesn't break
+# package init.
+for _subpkg_name in ("qwen3_tts_grpo", "multi_codebook_tts_grpo"):
+    try:
+        _subpkg = __import__(
+            f"verl_omni.pipelines.{_subpkg_name}", fromlist=["__all__"],
+        )
+    except ImportError as _exc:
+        _logger.debug(
+            "verl_omni.pipelines: skipping TTS subpackage %r (%s: %s).",
+            _subpkg_name, type(_exc).__name__, _exc,
+        )
+        continue
+    globals()[_subpkg_name] = _subpkg
+    __all__.extend(getattr(_subpkg, "__all__", []))

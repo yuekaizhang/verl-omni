@@ -2,30 +2,21 @@
 
 This module is at the project root (NOT inside ``verl_omni/``) so Ray's
 ``runtime_env.worker_process_setup_hook = "multi_codebook_tts_setup:setup"``
-can invoke it without dragging in the heavy ``verl_omni/__init__.py``
-import chain (which imports pipelines, diffusion adapters, rollout
-backends, etc. and would stall worker spawn).
+can invoke it from worker subprocesses. Replaces the old top-level
+``qwen3_tts_autoregister.py`` (deleted in task15). All seven monkey-patch
+points it covered are now in clean module-level code (see PROVENANCE.md
+under the qwen3_tts adapter subpackage and the docstrings of the
+relevant modules).
 
-Replaces the old top-level ``qwen3_tts_autoregister.py`` (deleted in
-task15). All seven monkey-patch points it covered are now folded into
-clean module-level code:
-
-1-3. HF ``AutoConfig`` / ``AutoModel`` / ``AutoModelForCausalLM``
-   registration -> module-import side-effect of
-   ``verl_omni.models.multi_codebook_tts.qwen3_tts``.
-4. ``_ROLLOUT_REGISTRY[("vllm_omni_tts","async")] = ...`` -> module-import
-   side-effect of ``verl_omni.pipelines.multi_codebook_tts_grpo``.
-5. ``verl.utils.attention_utils._get_attention_functions`` flash-attn
-   fallback -> ``verl_omni.utils.attention_utils_fallback`` (applied at
-   import time).
-6. ``Qwen3TTSConfig`` talker-field promotion + ``text_config`` alias ->
-   inside vendored ``configuration_qwen3_tts.py::Qwen3TTSConfig.__init__``.
-7. ``Qwen3TTSForConditionalGeneration.forward`` training shim -> replaced
-   by a real ``forward_training`` method on the vendored class
-   (pending task2; see PROVENANCE.md).
-
-Each registration runs once per worker subprocess (the underlying calls
-are idempotent via ``exist_ok=True`` / module-level guards).
+Fail-closed contract: Qwen3-TTS Auto* registration is the only REQUIRED
+side-effect — the recipe cannot load the codec model without it. If the
+required registration fails, ``setup()`` re-raises so workers crash
+loudly with the actual import error rather than silently continuing to
+later "Unrecognized model identifier" errors. The other side-effects
+(pipelines rollout registry entry, attention-utils fallback) are
+best-effort: their absence degrades specific features (e.g. flash-attn
+fallback is only needed on hosts without flash_attn installed) but does
+not prevent training.
 """
 
 import os
@@ -36,44 +27,46 @@ _REGISTERED = False
 
 def setup() -> None:
     """Idempotent worker registration. Called once per Ray worker subprocess
-    via ``runtime_env.worker_process_setup_hook``."""
+    via ``runtime_env.worker_process_setup_hook``.
+
+    Raises:
+        ImportError (or whatever the underlying import raised) when the
+        REQUIRED Qwen3-TTS Auto* registration cannot run. Optional
+        side-effects (rollout-registry, attention-utils fallback) failing
+        does NOT raise — they are logged to stderr.
+    """
     global _REGISTERED
     if _REGISTERED:
         return
 
     # Make sure the repo root is on sys.path. Ray's default worker spawn
     # does NOT inherit the launching shell's PYTHONPATH unless explicitly
-    # set in runtime_env.env_vars, but defending here is cheap.
+    # set in runtime_env.env_vars; defending here is cheap.
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
 
     # Optional fork PYTHONPATH (vllm-omni-verl, etc.). The recipe's
-    # `verl_omni.utils.ray_runtime_env.build_runtime_env` already appends
-    # the fork dir to env_vars["PYTHONPATH"] when VLLM_OMNI_VERL_DIR is
-    # set in the driver's env; this is a belt-and-suspenders fallback.
+    # `verl_omni.utils.ray_runtime_env.build_runtime_env` already
+    # appends the fork dir to env_vars["PYTHONPATH"] when
+    # VLLM_OMNI_VERL_DIR is set in the driver's env; this is a
+    # belt-and-suspenders fallback.
     fork = os.environ.get("VLLM_OMNI_VERL_DIR")
     if fork and fork not in sys.path:
         sys.path.insert(0, fork)
 
-    # Trigger the four side-effecting imports. Each is wrapped in
-    # try/except so a missing optional dep (e.g., diffusers required by
-    # verl_omni.pipelines._patch on the diffusion side) doesn't break
-    # TTS-only workers.
-    try:
-        # HF Auto* registration for Qwen3-TTS. Imports the vendored
-        # configuration + modeling and calls the three .register() lines
-        # at module-import time. See
-        # verl_omni/models/multi_codebook_tts/qwen3_tts/__init__.py.
-        import verl_omni.models.multi_codebook_tts.qwen3_tts  # noqa: F401
-    except Exception as exc:  # pragma: no cover - diagnostic
-        sys.stderr.write(
-            f"[multi_codebook_tts_setup] Qwen3-TTS Auto* registration "
-            f"failed: {type(exc).__name__}: {exc}\n"
-        )
+    # REQUIRED: HF Auto* registration for Qwen3-TTS. Imports the
+    # vendored configuration + modeling and calls the three .register()
+    # lines at module-import time. Re-raise on failure so workers fail
+    # loudly rather than crashing later with a misleading
+    # "Unrecognized model identifier" error.
+    import verl_omni.models.multi_codebook_tts.qwen3_tts  # noqa: F401
 
+    # Optional: _ROLLOUT_REGISTRY entry for the vllm_omni_tts async
+    # server. Failure does not block training - it would only block
+    # workers that need to resolve the rollout class by name, which
+    # the driver also does. Log to stderr so it shows up in Ray logs.
     try:
-        # _ROLLOUT_REGISTRY entry for the vllm_omni_tts async server.
         import verl_omni.pipelines.multi_codebook_tts_grpo  # noqa: F401
     except Exception as exc:  # pragma: no cover - diagnostic
         sys.stderr.write(
@@ -81,9 +74,10 @@ def setup() -> None:
             f"failed: {type(exc).__name__}: {exc}\n"
         )
 
+    # Optional: flash-attn fallback. Only relevant on hosts without
+    # flash_attn installed. The import has the side-effect of patching
+    # verl.utils.attention_utils if needed.
     try:
-        # flash-attn fallback. The import has the side-effect of patching
-        # verl.utils.attention_utils if flash_attn is missing.
         from verl_omni.utils import attention_utils_fallback  # noqa: F401
     except Exception as exc:  # pragma: no cover - diagnostic
         sys.stderr.write(
@@ -91,4 +85,5 @@ def setup() -> None:
             f"installation failed: {type(exc).__name__}: {exc}\n"
         )
 
+    # Mark registered ONLY after the required import succeeded.
     _REGISTERED = True
