@@ -33,6 +33,13 @@ defaults:
 actor_rollout_ref:
   model:
     name: qwen3_tts
+    # Drives `engine_workers.EngineRegistry.new(model_type=...)` to the
+    # MultiCodebookTTSFSDPEngine (registered via
+    # `verl_omni/workers/engine/fsdp/multi_codebook_impl.py`). Without
+    # this override the engine falls back to upstream's
+    # FSDPEngineWithLMHead (model_type="language_model"), which only
+    # produces the cb0 log_probs stream.
+    model_type: multi_codebook_tts
 
   # AC-3 gating flag: defaults OFF in v1 (the vllm-omni-verl cb_rest
   # diagnostic logprob emission is deferred per DEC-5). When ON in a

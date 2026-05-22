@@ -12,5 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .diffusers_impl import DiffusersFSDPEngine, PPODiffusersFSDPEngine  # noqa: F401
+# Import to trigger `@EngineRegistry.register(model_type="multi_codebook_tts", ...)`.
+from .multi_codebook_impl import MultiCodebookTTSFSDPEngine  # noqa: F401
 
-__all__ = ["PPODiffusersFSDPEngine", "DiffusersFSDPEngine"]
+__all__ = ["PPODiffusersFSDPEngine", "DiffusersFSDPEngine", "MultiCodebookTTSFSDPEngine"]

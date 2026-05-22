@@ -1866,6 +1866,117 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
     def get_supported_languages(self):
         return self.supported_languages
 
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        codec_ids: torch.Tensor | None = None,
+        response_mask: torch.Tensor | None = None,
+        prompt_lens: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        past_key_values=None,
+        use_cache: bool | None = None,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        **kwargs,
+    ):
+        """Training-mode forward.
+
+        Two call shapes are supported:
+
+        1. **Multi-codebook training** (when `codec_ids` is supplied):
+           Drives `forward_training` and returns a `CausalLMOutputWithPast`
+           whose `.logits` carry the cb0 stream AND whose
+           `.hidden_states` slot carries `cb_rest_logits` as a single-
+           element tuple. The FSDP engine subclass
+           (`MultiCodebookTTSFSDPEngine`) reads both fields. This is the
+           shape the multi_codebook_tts_grpo recipe relies on so the
+           dual-stream gradient flows through FSDP's `forward()`
+           interception correctly.
+
+        2. **Single-codebook fallback** (when `codec_ids` is absent):
+           Mirrors the legacy `qwen3_tts_autoregister.py` shim that the
+           pre-migration recipe used for cb0-only training. Drives
+           `talker.model` + `talker.codec_head` and returns a standard
+           `CausalLMOutputWithPast`. Kept for bisection / legacy recipe
+           replays only.
+        """
+        talker = self.talker
+        talker_cfg = talker.config
+
+        if codec_ids is not None:
+            # Multi-codebook training path. Delegates to forward_training,
+            # then packages the two logits streams into a CausalLMOutputWithPast
+            # the FSDP engine subclass knows how to unpack.
+            if prompt_lens is None:
+                # Derive prompt_lens from input_ids / codec_ids shapes when
+                # the caller did not supply it. Uniform across the batch.
+                B = input_ids.shape[0]
+                T_total = input_ids.shape[1]
+                T_codec = codec_ids.shape[1]
+                prompt_lens = torch.full(
+                    (B,), T_total - T_codec, dtype=torch.long, device=input_ids.device,
+                )
+            talker_logits, cb_rest_logits = self.forward_training(
+                input_ids=input_ids,
+                codec_ids=codec_ids,
+                attention_mask=attention_mask,
+                response_mask=response_mask if response_mask is not None else attention_mask,
+                prompt_lens=prompt_lens,
+            )
+            return CausalLMOutputWithPast(
+                loss=None,
+                logits=talker_logits,
+                past_key_values=None,
+                # Carry cb_rest_logits via the hidden_states tuple slot so the
+                # output type stays a plain `CausalLMOutputWithPast` and
+                # downstream engine code that only consumes `.logits` keeps
+                # working. The FSDP engine subclass reads
+                # `output.hidden_states[0]` to recover cb_rest_logits.
+                hidden_states=(cb_rest_logits,),
+                attentions=None,
+            )
+
+        # Single-codebook fallback (cb0 only). Same logic as the deleted
+        # `qwen3_tts_autoregister.py` shim, preserved here so bisection
+        # against the legacy recipe is still possible if needed.
+        if inputs_embeds is None:
+            if input_ids is None:
+                raise ValueError(
+                    "Qwen3-TTS forward requires either codec_ids "
+                    "(multi-codebook path) or input_ids / inputs_embeds "
+                    "(cb0-only path)."
+                )
+            codec_vocab = int(getattr(talker_cfg, "vocab_size", 3072))
+            pad_id = int(getattr(talker_cfg, "codec_pad_id", 0))
+            safe_input_ids = torch.where(
+                (input_ids >= 0) & (input_ids < codec_vocab),
+                input_ids,
+                torch.full_like(input_ids, pad_id),
+            )
+            inputs_embeds = talker.get_input_embeddings()(safe_input_ids)
+
+        outputs = talker.model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache or False,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_states = outputs.last_hidden_state
+        logits = talker.codec_head(hidden_states)
+        return CausalLMOutputWithPast(
+            loss=None,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
     def forward_training(
         self,
         input_ids: torch.LongTensor,
