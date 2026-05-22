@@ -22,7 +22,11 @@ from typing import Callable, Optional
 import huggingface_hub
 import torch
 from huggingface_hub import snapshot_download
-from librosa.filters import mel as librosa_mel_fn
+# NOTE (verl-omni vendoring): `librosa` is only needed by the
+# `mel_spectrogram` helper (used at inference time to encode ref-audio
+# into a speaker embedding); the training path never calls it. We defer
+# the import so worker images that ship without librosa can still
+# `from_pretrained` the model.
 from torch import nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
@@ -437,6 +441,10 @@ def mel_spectrogram(
         print(f"[WARNING] Max value of input waveform signal is {torch.max(y)}")
 
     device = y.device
+
+    # Lazy import: librosa is only needed in this inference-time helper
+    # (see vendoring note at the top of the file).
+    from librosa.filters import mel as librosa_mel_fn
 
     mel = librosa_mel_fn(
         sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax
@@ -1857,7 +1865,134 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
     
     def get_supported_languages(self):
         return self.supported_languages
-    
+
+    def forward_training(
+        self,
+        input_ids: torch.LongTensor,
+        codec_ids: torch.LongTensor,
+        attention_mask: torch.Tensor,
+        response_mask: torch.Tensor,
+        prompt_lens: torch.Tensor,
+    ):
+        """Multi-codebook training-time forward.
+
+        Args:
+            input_ids: ``[B, T_total]`` — prompt + codec tokens concatenated.
+                Tokens outside the codec vocab (i.e. the HF-tokenized prompt
+                portion) are clamped to ``talker.codec_pad_id`` so the codec
+                embedding lookup stays in range.
+            codec_ids: ``[B, T_codec, N]`` — codec tokens for the response
+                region only. ``N = config.talker_config.num_code_groups``
+                (cb0 at ``[..., 0]``, residual codebooks at ``[..., 1:]``).
+            attention_mask: ``[B, T_total]``.
+            response_mask: ``[B, T_total]``; ``1`` on generated codec frames.
+                Currently only used to size the response region indirectly
+                through ``prompt_lens + T_codec``; the actor handles masking
+                at the loss layer.
+            prompt_lens: ``[B]`` — per-sample prompt length, used to slice the
+                talker hidden states at ``prompt_lens[b]-1 : prompt_lens[b]-1
+                + T_codec`` so each sample's cb_rest predictor sees the right
+                frame contexts.
+
+        Returns:
+            Tuple ``(talker_logits, cb_rest_logits)``:
+            - ``talker_logits``: ``[B, T_total, V_cb0]``. cb0 logits over
+              the full sequence; the actor slices the response region via
+              ``[:, prompt_len-1:-1, :]`` before computing log-probs.
+            - ``cb_rest_logits``: ``[B, T_codec, N-1, V_cb_rest]``. cb1..cb_{N-1}
+              logits over the response region. Layout is frame-major outer,
+              codebook-major inner so the actor can ``.flatten(1, 2)`` to a
+              ``[B, T_codec*(N-1)]`` view matching the cb_rest mask layout
+              described in AC-5.2.
+
+        The implementation drives:
+          1. ``self.talker.model`` + ``self.talker.codec_head`` on the full
+             input to produce cb0 logits + the talker hidden states.
+          2. ``self.talker.forward_sub_talker_finetune`` over a
+             ``[B*T_codec, N]`` flattened batch of (codec frame, talker
+             hidden) pairs to produce cb_rest logits. Per-sample slicing of
+             the talker hidden via ``torch.gather`` handles variable prompt
+             lengths (AC-5.1).
+        """
+        talker = self.talker
+        talker_cfg = talker.config
+
+        B, T_total = input_ids.shape
+        # Validate codec_ids shape.
+        if codec_ids.dim() != 3:
+            raise ValueError(
+                f"forward_training expected codec_ids of shape [B, T_codec, N]; "
+                f"got {tuple(codec_ids.shape)}."
+            )
+        _, T_codec, N = codec_ids.shape
+        expected_N = int(getattr(talker_cfg, "num_code_groups", N))
+        if N != expected_N:
+            raise ValueError(
+                f"codec_ids last dim ({N}) does not match "
+                f"talker_config.num_code_groups ({expected_N}). The actor and "
+                f"the agent loop must agree on the codebook count."
+            )
+
+        # 1. Clamp prompt-region input_ids to the codec vocab so the codec
+        #    embedding lookup stays in range. Carries the clamp/pad logic
+        #    from the deleted `qwen3_tts_autoregister.py` shim.
+        codec_vocab = int(getattr(talker_cfg, "vocab_size"))
+        codec_pad_id = int(getattr(talker_cfg, "codec_pad_id", 0))
+        safe_input_ids = torch.where(
+            (input_ids >= 0) & (input_ids < codec_vocab),
+            input_ids,
+            torch.full_like(input_ids, codec_pad_id),
+        )
+        inputs_embeds = talker.get_input_embeddings()(safe_input_ids)
+
+        # 2. Run the talker decoder over the full sequence (cb0 path).
+        outputs = talker.model(
+            input_ids=None,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            use_cache=False,
+        )
+        talker_hidden = outputs.last_hidden_state          # [B, T_total, H]
+        talker_logits = talker.codec_head(talker_hidden)    # [B, T_total, V_cb0]
+        hidden_size = talker_hidden.size(-1)
+
+        # 3. Per-sample slice of talker_hidden to the response region.
+        #    For frame `t` of sample `b`, the relevant talker hidden vector
+        #    is at index `prompt_lens[b]-1 + t` (next-token alignment).
+        device = talker_hidden.device
+        frame_offsets = (
+            prompt_lens.to(device).unsqueeze(1) - 1
+            + torch.arange(T_codec, device=device).unsqueeze(0)
+        )                                                  # [B, T_codec]
+        frame_offsets = frame_offsets.clamp(0, T_total - 1)
+        talker_hidden_resp = torch.gather(
+            talker_hidden,
+            dim=1,
+            index=frame_offsets.unsqueeze(-1).expand(-1, -1, hidden_size),
+        )                                                  # [B, T_codec, H]
+
+        # 4. Flatten (B, T_codec) -> B*T_codec rows so we can run the
+        #    code_predictor once per frame across the whole batch.
+        flat_codec = codec_ids.reshape(B * T_codec, N)
+        flat_hidden = talker_hidden_resp.reshape(B * T_codec, hidden_size)
+
+        # 5. Run the code_predictor (cb_rest path). Returns
+        #    `(logits[B*T, N-1, V_cb_rest], loss)`. We discard the loss
+        #    (forward_sub_talker_finetune always computes it; this is a
+        #    wasted CE term, not a correctness issue).
+        cb_rest_logits_flat, _ = talker.forward_sub_talker_finetune(
+            flat_codec, flat_hidden,
+        )
+
+        # 6. Reshape back to `[B, T_codec, N-1, V_cb_rest]`. Frame-major
+        #    outer + codebook-major inner so the actor's `.flatten(1, 2)`
+        #    yields the cb_rest mask layout described in AC-5.2.
+        cb_rest_logits = cb_rest_logits_flat.reshape(
+            B, T_codec, N - 1, cb_rest_logits_flat.size(-1)
+        )
+
+        return talker_logits, cb_rest_logits
+
     @classmethod
     def from_pretrained(
         cls,

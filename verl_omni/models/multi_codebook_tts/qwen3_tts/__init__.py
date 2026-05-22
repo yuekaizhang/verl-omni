@@ -38,10 +38,16 @@ AutoModelForCausalLM.register(
     Qwen3TTSConfig, Qwen3TTSForConditionalGeneration, exist_ok=True
 )
 
+# Import the adapter for its `@register_adapter("qwen3_tts")` decorator
+# side-effect: populates `MULTI_CODEBOOK_ADAPTER_REGISTRY["qwen3_tts"]`
+# so the recipe trainer can dispatch by `model.name`.
+from .adapter import Qwen3TTSAdapter  # noqa: E402, F401
+
 __all__ = [
     "Qwen3TTSConfig",
     "Qwen3TTSSpeakerEncoderConfig",
     "Qwen3TTSTalkerCodePredictorConfig",
     "Qwen3TTSTalkerConfig",
     "Qwen3TTSForConditionalGeneration",
+    "Qwen3TTSAdapter",
 ]
