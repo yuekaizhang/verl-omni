@@ -26,11 +26,12 @@ defaults:
   # is then a delta on top of this baseline.
   - ppo_base
 
-  # Per-role TTS deltas merged into the right sub-paths.
-  - /qwen3_tts/actor@actor_rollout_ref.actor: qwen3_tts_actor
-  - /qwen3_tts/ref@actor_rollout_ref.ref: qwen3_tts_ref
-  - /qwen3_tts/rollout@actor_rollout_ref.rollout: qwen3_tts_rollout
-  - /qwen3_tts/reward@reward: qwen3_tts_reward
+  # Per-role TTS deltas merged into the right sub-paths. Paths are
+  # resolved relative to this file's directory (multi_codebook_tts/qwen3_tts_legacy/).
+  - /multi_codebook_tts/qwen3_tts_legacy/actor@actor_rollout_ref.actor: qwen3_tts_actor
+  - /multi_codebook_tts/qwen3_tts_legacy/ref@actor_rollout_ref.ref: qwen3_tts_ref
+  - /multi_codebook_tts/qwen3_tts_legacy/rollout@actor_rollout_ref.rollout: qwen3_tts_rollout
+  - /multi_codebook_tts/qwen3_tts_legacy/reward@reward: qwen3_tts_reward
 
   - _self_
 
@@ -69,7 +70,7 @@ data:
   custom_cls:
     # upstream verl.utils.import_utils.load_module expects an absolute
     # FILE PATH to the .py module, not a dotted import path.
-    path: ${oc.env:PWD}/verl_omni/utils/dataset/qwen3_tts_dataset.py
+    path: ${oc.env:PWD}/verl_omni/utils/dataset/multi_codebook_tts_dataset.py
     name: Qwen3TTSDataset
   train_batch_size: 4
   val_batch_size: 4

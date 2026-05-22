@@ -39,14 +39,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Stage config: shared with the legacy `qwen3_tts_grpo` recipe for v1
-# (the new recipe inherits the same stage_config until the legacy path is
-# deleted in task15; after that the file moves under this package).
-_LEGACY_STAGE_CONFIG = (
-    Path(__file__).resolve().parents[1]
-    / "qwen3_tts_grpo"
-    / "stage_configs"
-    / "qwen3_tts.yaml"
+# Stage config: lives under this package (migrated from the deleted
+# legacy pipelines path).
+_STAGE_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "stage_configs" / "qwen3_tts.yaml"
 )
 
 ROLLOUT_REPLICA_NAME = "vllm_omni_tts"
@@ -60,12 +56,8 @@ ALGORITHM = "grpo"
 
 
 def get_stage_config_path() -> str:
-    """Return the on-disk path to the verl-omni stage_config override.
-
-    Currently shared with the legacy qwen3_tts_grpo path (until task15
-    deletes that recipe + moves the stage_configs/ subdir under this
-    package)."""
-    return str(_LEGACY_STAGE_CONFIG)
+    """Return the on-disk path to the verl-omni stage_config override."""
+    return str(_STAGE_CONFIG_PATH)
 
 
 def apply_diagnostic_logprobs_to_batch(

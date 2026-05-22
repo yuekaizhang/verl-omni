@@ -34,7 +34,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
 
 ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
 
-"${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.qwen3_tts_grpo.run_eval \
+"${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.multi_codebook_tts_grpo.run_eval \
   --base-ckpt "${BASE_CKPT}" \
   --rl-ckpt "${RL_CKPT}" \
   --eval-parquet "${EVAL_PARQUET}" \

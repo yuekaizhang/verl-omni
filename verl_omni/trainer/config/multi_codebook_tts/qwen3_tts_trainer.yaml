@@ -17,11 +17,10 @@
 
 defaults:
 
-  # Reuse the legacy qwen3_tts trainer base (composes ppo_base + diffusion
-  # FSDP overlays + rollout/ref/reward sub-configs). Deleting it is
-  # task15's job; for now this delta layers on top so the recipe works
-  # in parallel with the old path.
-  - /qwen3_tts/qwen3_tts_trainer
+  # Inherit the upstream PPO base + per-role overlays from the (migrated,
+  # in-tree) qwen3_tts_legacy subdir. Deletion of the OLD top-level
+  # `verl_omni/trainer/config/qwen3_tts/` happens in task15.
+  - /multi_codebook_tts/qwen3_tts_legacy/qwen3_tts_trainer
 
   # New multi-codebook actor (overrides the legacy single-stream actor).
   - /multi_codebook_tts/actor@actor_rollout_ref.actor: multi_codebook_actor

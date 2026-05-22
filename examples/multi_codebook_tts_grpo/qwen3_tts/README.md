@@ -31,7 +31,7 @@ upstream verl GRPO loss  -->  FSDP actor update  -->  checkpoint hot-reload
 ## Layout
 
 ```
-examples/qwen3_tts_grpo_trainer/
+examples/multi_codebook_tts_grpo/qwen3_tts/
 ├── README.md                                 # this file
 ├── data_process/aishell_voice_clone.py       # build (ref_audio, ref_text, prompt_text) triples
 └── run_smoke.sh                              # minimal smoke launcher
@@ -54,7 +54,7 @@ verl_omni/
 │   └── reward/qwen3_tts_reward.yaml
 └── trainer/qwen3_tts_grpo/                                     # entry point + validator
     ├── launcher.py                                              # validate_qwen3_tts_recipe_config
-    └── main.py                                                  # python -m verl_omni.trainer.qwen3_tts_grpo.main
+    └── main.py                                                  # python -m verl_omni.trainer.multi_codebook_tts_grpo.main
 ```
 
 ## Quick start (smoke)
@@ -62,7 +62,7 @@ verl_omni/
 1. **Build training parquets** from `yuekai/aishell`:
 
    ```bash
-   .venv/bin/python examples/qwen3_tts_grpo_trainer/data_process/aishell_voice_clone.py \
+   .venv/bin/python examples/multi_codebook_tts_grpo/qwen3_tts/data_process/aishell_voice_clone.py \
        --hf-dataset yuekai/aishell \
        --output-dir /path/to/data \
        --train-pairs-per-speaker 20 \
@@ -83,7 +83,7 @@ verl_omni/
    QWEN3_ASR_BASE_URL=http://localhost:8001 \
    TRAIN_PARQUET=/path/to/data/train.parquet \
    EVAL_PARQUET=/path/to/data/eval.parquet \
-       bash examples/qwen3_tts_grpo_trainer/run_smoke.sh
+       bash examples/multi_codebook_tts_grpo/qwen3_tts/run_smoke.sh
    ```
 
    The launcher rejects the run before any GPU work if `default_agent_loop`,
@@ -114,7 +114,7 @@ CER is the default Mandarin metric. WER is opt-in via
 ```bash
 QWEN3_ASR_BASE_URL=http://localhost:8001 \
 TRAIN_PARQUET=/path/to/data/train.parquet \
-    bash examples/qwen3_tts_grpo_trainer/eval.sh \
+    bash examples/multi_codebook_tts_grpo/qwen3_tts/eval.sh \
         /path/to/base.ckpt /path/to/rl.ckpt /path/to/data/eval.parquet
 ```
 

@@ -44,7 +44,7 @@ ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
 HYDRA_OUTPUT_BASE="${HYDRA_OUTPUT_BASE:-/tmp/qwen3_tts_smoke_outputs}"
 
 # shellcheck disable=SC2086
-"${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.qwen3_tts_grpo.main \
+"${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.multi_codebook_tts_grpo.main \
   data.train_files="${TRAIN_PARQUET}" \
   data.val_files="${EVAL_PARQUET}" \
   actor_rollout_ref.model.path="${QWEN3_TTS_MODEL_PATH}" \
