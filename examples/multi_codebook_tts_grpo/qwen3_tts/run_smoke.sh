@@ -34,7 +34,7 @@ export RAY_ADDRESS="${RAY_ADDRESS:-local}"
 # can put it on sys.path and register the classes with HF AutoModel.
 export QWEN3_TTS_SOURCE_DIR="${QWEN3_TTS_SOURCE_DIR:-/lustre/fsw/portfolios/coreai/users/yuekaiz/tts/Qwen3-TTS}"
 
-ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")"/../../.. && pwd)"
 
 # Hydra defaults write run logs / checkpoints under the launching CWD
 # (``./outputs/``), which on this lustre filesystem hits the per-user

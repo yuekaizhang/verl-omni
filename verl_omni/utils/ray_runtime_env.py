@@ -28,7 +28,7 @@ def _repo_root() -> str:
 
 def build_runtime_env(
     *,
-    setup_hook: str = "multi_codebook_tts_setup:setup",
+    setup_hook: str = "multi_codebook_tts_setup.setup",
     extra_env_vars: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a Ray `runtime_env` dict for `multi_codebook_tts_grpo` workers.

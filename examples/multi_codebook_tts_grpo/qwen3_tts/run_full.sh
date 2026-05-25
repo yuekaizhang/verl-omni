@@ -25,7 +25,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-qwen3-tts-verl-omni}"
 WANDB_NAME="${WANDB_NAME:-qwen3_tts_grpo_full}"
 TOTAL_STEPS="${TOTAL_STEPS:-500}"
 
-ROOT_DIR="$(cd "$(dirname "$0")"/../.. && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")"/../../.. && pwd)"
 
 "${ROOT_DIR}/.venv/bin/python" -m verl_omni.trainer.multi_codebook_tts_grpo.main \
   data.train_files="${TRAIN_PARQUET}" \
