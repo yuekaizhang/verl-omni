@@ -28,7 +28,10 @@ from typing import Any
 
 from verl.workers.config.actor import FSDPActorConfig
 
-__all__ = ["MultiCodebookFSDPActorConfig", "MultiCodebookStreamConfig"]
+__all__ = [
+    "MultiCodebookFSDPActorConfig",
+    "MultiCodebookStreamConfig",
+]
 
 
 @dataclass
@@ -82,6 +85,11 @@ class MultiCodebookFSDPActorConfig(FSDPActorConfig):
     # The legacy `model.name` location collided with upstream's strict
     # `HFModelConfig`; keeping it on the actor sub-config side-steps that.
     codec_adapter: str = "qwen3_tts"
+    # AC-3 gating flag. Lives on the actor sub-config (not rollout) so we
+    # don't have to subclass + override the upstream `RolloutConfig` (which
+    # is itself a strict dataclass + carries fields like `disaggregation`
+    # whose struct schema would break if we replaced its `_target_`).
+    diagnostic_logprobs: bool = False
 
     def __post_init__(self):
         super().__post_init__()

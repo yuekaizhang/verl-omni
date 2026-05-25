@@ -48,11 +48,10 @@ actor_rollout_ref:
     # sibling adapter under that registry and flip this string.
     codec_adapter: qwen3_tts
 
-  # AC-3 gating flag: defaults OFF in v1 (the vllm-omni-verl cb_rest
-  # diagnostic logprob emission is deferred per DEC-5). When ON in a
-  # follow-up PR, the rollout adapter consumes `vllm_logprob_cb_rest`
-  # from the rollout batch and emits `vllm_drift/cb_rest` metrics.
-  rollout:
+    # AC-3 gating flag: defaults OFF in v1 (the vllm-omni-verl cb_rest
+    # diagnostic logprob emission is deferred per DEC-5). Lives on the
+    # actor sub-config (which we already subclass) so we don't have to
+    # subclass upstream's strict `RolloutConfig` schema.
     diagnostic_logprobs: false
 
 trainer:

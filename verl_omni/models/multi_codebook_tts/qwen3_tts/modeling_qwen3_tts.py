@@ -2037,7 +2037,12 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
             )
         _, T_codec, N = codec_ids.shape
         expected_N = int(getattr(talker_cfg, "num_code_groups", N))
-        if N != expected_N:
+        # When the rollout payload carries only cb0 (legacy / pre-fork-edit
+        # state — see DEC-5), N=1 and we skip the cb_rest stream entirely.
+        # The actor's loss function already has a documented fallback path
+        # when `log_probs_cb_rest` is missing from `model_output`.
+        cb_rest_skipped = N == 1
+        if not cb_rest_skipped and N != expected_N:
             raise ValueError(
                 f"codec_ids last dim ({N}) does not match "
                 f"talker_config.num_code_groups ({expected_N}). The actor and "
@@ -2081,6 +2086,18 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
             dim=1,
             index=frame_offsets.unsqueeze(-1).expand(-1, -1, hidden_size),
         )                                                  # [B, T_codec, H]
+
+        if cb_rest_skipped:
+            # cb_rest stream omitted (rollout payload only carries cb0).
+            # Return an empty placeholder so callers that unpack two
+            # tensors don't crash. The downstream engine + loss already
+            # treat empty `cb_rest_logits` as the cb0-only fallback.
+            cb_rest_logits = torch.zeros(
+                (B, T_codec, 0, 1),
+                device=input_ids.device,
+                dtype=talker_logits.dtype,
+            )
+            return talker_logits, cb_rest_logits
 
         # 4. Sanitize residual codec_ids for the code_predictor embedding
         #    lookup. `forward_sub_talker_finetune` embeds the cb0 token at

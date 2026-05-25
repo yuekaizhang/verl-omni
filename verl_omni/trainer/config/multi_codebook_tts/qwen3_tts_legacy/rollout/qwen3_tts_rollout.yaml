@@ -95,3 +95,12 @@ agent:
   # The verl-omni-side AgentLoopManager subclass that injects our worker.
   agent_loop_manager_class: verl_omni.agent_loop.autoregressive_tts_agent_loop.AutoRegressiveTTSAgentLoopManager
   agent_loop_config_path: null
+
+
+# Upstream verl (current main) makes `rollout.disaggregation` required for
+# the rollout server's __init__ (`llm_server.py:253`:
+# `self.rollout_config.disaggregation.enabled`). The legacy ppo_base
+# doesn't ship this block, so we add the disabled default explicitly to
+# satisfy struct-mode access.
+disaggregation:
+  enabled: false

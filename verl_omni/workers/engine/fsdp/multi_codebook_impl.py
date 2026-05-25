@@ -163,6 +163,13 @@ class MultiCodebookTTSFSDPEngine(FSDPEngineWithLMHead):
             return model_output
 
         cb_rest_logits = hidden_states[0]
+        # Skip when the model returned an empty cb_rest tensor — happens
+        # when the rollout payload only carries cb0 (legacy single-codebook
+        # state; DEC-5 deferred the vllm-omni-verl fork edit that emits all
+        # N codebooks). `multi_codebook_ppo_loss` already has a documented
+        # fallback path when `log_probs_cb_rest` is absent.
+        if cb_rest_logits.numel() == 0 or cb_rest_logits.size(-2) == 0:
+            return model_output
         # Expected shape: [B, T_codec, N-1, V_cb_rest]
         if cb_rest_logits.dim() != 4:
             logger.warning(

@@ -91,9 +91,13 @@ def validate_multi_codebook_tts_recipe_config(config: DictConfig) -> None:
             "weighted-sum loss degenerate."
         )
 
-    # 3. rollout.diagnostic_logprobs is a boolean.
+    # 3. actor.diagnostic_logprobs is a boolean. (Lives on the actor
+    # sub-config — see qwen3_tts_trainer.yaml — to avoid touching the
+    # upstream `RolloutConfig` schema.)
     diag = _read(
-        config, "actor_rollout_ref.rollout.diagnostic_logprobs", default=False,
+        config,
+        "actor_rollout_ref.actor.diagnostic_logprobs",
+        default=_read(config, "actor_rollout_ref.rollout.diagnostic_logprobs", default=False),
     )
     if not isinstance(diag, bool):
         raise ValueError(

@@ -27,11 +27,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from verl.workers.rollout.llm_server import (
-    FullyLLMServerClient,
-    LLMServerClient,
-    LLMServerManager,
-)
+from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
+
+# `FullyLLMServerClient` existed in earlier verl revisions but was removed
+# in the version currently pinned by this repo (only `LLMServerClient` and
+# `LLMServerManager` are exported now). The symbol was imported here only
+# as a type hint; the patched `get_client` doesn't use it, so missing it is
+# harmless. Probe at import time for back-compat with older verl revisions.
+try:
+    from verl.workers.rollout.llm_server import FullyLLMServerClient  # noqa: F401
+except ImportError:
+    FullyLLMServerClient = None  # type: ignore[assignment]
 
 from verl_omni.workers.rollout.autoregressive_tts_server_client import (
     AutoRegressiveTTSServerClient,

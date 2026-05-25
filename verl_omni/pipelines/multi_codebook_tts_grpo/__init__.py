@@ -32,6 +32,7 @@ from .vllm_omni_rollout_adapter import (  # noqa: E402, F401
     ALGORITHM,
     ARCHITECTURE,
     ROLLOUT_REPLICA_NAME,
+    STAGE_CONFIG_PATH,
     apply_diagnostic_logprobs_to_batch,
     get_stage_config_path,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "ALGORITHM",
     "ARCHITECTURE",
     "ROLLOUT_REPLICA_NAME",
+    "STAGE_CONFIG_PATH",
     "apply_diagnostic_logprobs_to_batch",
     "get_stage_config_path",
 ]

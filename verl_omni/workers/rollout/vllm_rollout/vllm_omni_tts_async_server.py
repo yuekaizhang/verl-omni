@@ -51,7 +51,7 @@ from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt
 from vllm_omni.outputs import OmniRequestOutput
 
-from verl_omni.pipelines.qwen3_tts_grpo import STAGE_CONFIG_PATH
+from verl_omni.pipelines.multi_codebook_tts_grpo import STAGE_CONFIG_PATH
 from verl_omni.workers.rollout.replica import (
     AudioRolloutOutput,
     CompletionAudio,

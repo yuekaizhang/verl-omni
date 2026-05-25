@@ -45,6 +45,10 @@ _STAGE_CONFIG_PATH = (
     Path(__file__).resolve().parent / "stage_configs" / "qwen3_tts.yaml"
 )
 
+# Public alias for back-compat with the legacy import path
+# `from verl_omni.pipelines.qwen3_tts_grpo import STAGE_CONFIG_PATH`.
+STAGE_CONFIG_PATH = _STAGE_CONFIG_PATH
+
 ROLLOUT_REPLICA_NAME = "vllm_omni_tts"
 """Name registered with ``RolloutReplicaRegistry`` for this recipe."""
 

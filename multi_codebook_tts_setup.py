@@ -25,6 +25,60 @@ import sys
 _REGISTERED = False
 
 
+def _pin_cuda_visible_devices_for_rank() -> None:
+    """Pin this worker process to a single physical GPU based on its
+    Ray-assigned ``RANK``.
+
+    Why this is needed: verl's `_create_worker` allocates
+    `num_gpus = 1 / max_colocate_count` (fractional, e.g. ~0.333 when
+    actor+rollout+ref are colocated). For fractional GPU allocations
+    Ray does NOT slice ``CUDA_VISIBLE_DEVICES`` per worker — every
+    worker sees the full list. Workers default to physical device 0
+    when they call ``torch.cuda.set_device(0)``, so FSDP rank 0 and
+    rank 1 collide on the same GPU and NCCL raises "Duplicate GPU
+    detected" during ``_sync_module_params_and_buffers``.
+
+    Fix (verl-omni-side, no upstream verl change): in the worker
+    setup hook, read ``RANK`` and ``RAY_LOCAL_WORLD_SIZE`` that verl
+    already set on the worker, and narrow ``CUDA_VISIBLE_DEVICES`` to
+    just this worker's assigned device BEFORE any torch import. The
+    subsequent HF Auto* registration imports torch with the correct
+    device visible, and downstream ``torch.cuda.set_device(0)``
+    resolves to the right physical GPU.
+    """
+    rank_str = os.environ.get("RANK")
+    if rank_str is None:
+        # Not a Ray worker (e.g. driver process, unit-test invocation).
+        return
+    try:
+        rank = int(rank_str)
+    except ValueError:
+        return
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible:
+        return  # Ray already sliced, or nothing to pin.
+    devices = [d.strip() for d in visible.split(",") if d.strip()]
+    if not devices:
+        return
+
+    # Map global rank → local device. Each placement-group group (actor,
+    # rollout, ref under colocation) sees `RANK` cycle within its own
+    # world, but `RANK` is set per group by verl so `rank % len(devices)`
+    # gives a stable device for each rank.
+    local_idx = rank % len(devices)
+    chosen = devices[local_idx]
+    os.environ["CUDA_VISIBLE_DEVICES"] = chosen
+    # Diagnostic — emit once per worker so the smoke log shows the
+    # pinning result.
+    sys.stderr.write(
+        f"[multi_codebook_tts_setup] pinning RANK={rank} -> "
+        f"CUDA_VISIBLE_DEVICES={chosen} (was {visible!r}, "
+        f"{len(devices)} visible)\n"
+    )
+    sys.stderr.flush()
+
+
 def setup() -> None:
     """Idempotent worker registration. Called once per Ray worker subprocess
     via ``runtime_env.worker_process_setup_hook``.
@@ -38,6 +92,12 @@ def setup() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
+
+    # MUST happen before any torch-importing chain runs (HF Auto*
+    # registration below triggers torch via the model class). See the
+    # docstring on `_pin_cuda_visible_devices_for_rank` for the
+    # Ray/fractional-GPU rationale.
+    _pin_cuda_visible_devices_for_rank()
 
     # Make sure the repo root is on sys.path. Ray's default worker spawn
     # does NOT inherit the launching shell's PYTHONPATH unless explicitly
