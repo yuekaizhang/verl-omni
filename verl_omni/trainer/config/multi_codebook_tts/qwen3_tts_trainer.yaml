@@ -32,7 +32,6 @@ defaults:
 # `verl_omni.models.multi_codebook_tts`.
 actor_rollout_ref:
   model:
-    name: qwen3_tts
     # Drives `engine_workers.EngineRegistry.new(model_type=...)` to the
     # MultiCodebookTTSFSDPEngine (registered via
     # `verl_omni/workers/engine/fsdp/multi_codebook_impl.py`). Without
@@ -40,6 +39,14 @@ actor_rollout_ref:
     # FSDPEngineWithLMHead (model_type="language_model"), which only
     # produces the cb0 log_probs stream.
     model_type: multi_codebook_tts
+
+  actor:
+    # Codec adapter dispatch key. Resolved against
+    # `verl_omni.models.multi_codebook_tts.MULTI_CODEBOOK_ADAPTER_REGISTRY`
+    # so the actor + launcher can pick the right adapter without touching
+    # upstream's `HFModelConfig`. Future codecs (e.g. fish-speech) add a
+    # sibling adapter under that registry and flip this string.
+    codec_adapter: qwen3_tts
 
   # AC-3 gating flag: defaults OFF in v1 (the vllm-omni-verl cb_rest
   # diagnostic logprob emission is deferred per DEC-5). When ON in a

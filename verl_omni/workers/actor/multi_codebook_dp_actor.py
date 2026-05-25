@@ -67,6 +67,9 @@ class MultiCodebookActorConfig:
     w_cb_rest: float = 0.1
     cb0: _StreamLossConfig = None  # type: ignore[assignment]
     cb_rest: _StreamLossConfig = None  # type: ignore[assignment]
+    # Codec adapter dispatch key (mirrored from `actor.codec_adapter` in the
+    # YAML schema). Kept as `model_name` here for back-compat with the
+    # unit tests that already pass `model_name="qwen3_tts"`.
     model_name: str = "qwen3_tts"
 
     def __post_init__(self) -> None:

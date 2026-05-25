@@ -50,6 +50,17 @@ _LOGGED_MISSING_CB_REST_HIDDEN = False
     device=["cuda", "npu"],
 )
 class MultiCodebookTTSFSDPEngine(FSDPEngineWithLMHead):
+    # Treat this recipe as a language model for the purposes of upstream's
+    # `_build_module()` dispatch (it asserts model_type ∈ {language_model,
+    # value_model}). The HF `AutoModelForCausalLM.from_pretrained` path that
+    # branch uses resolves to our vendored `Qwen3TTSForConditionalGeneration`
+    # because the adapter's `__init__.py` already registered it. We can't
+    # leave `model_type="language_model"` in the YAML because that would
+    # route `EngineRegistry.new(...)` to upstream's vanilla LM engine
+    # instead of ours; the override below lets `model_type` drive engine
+    # dispatch + still let the base class build the model.
+    _BASE_MODEL_TYPE = "language_model"
+
     """FSDP engine that produces per-stream `log_probs` (cb0 + cb_rest).
 
     `prepare_model_inputs` forwards the multi-codebook fields
@@ -64,6 +75,19 @@ class MultiCodebookTTSFSDPEngine(FSDPEngineWithLMHead):
     major-within-frame layout (matches AC-5.2 + the test fixtures in
     `tests/multi_codebook_tts/test_cb_rest_flatten_order.py`).
     """
+
+    # ------------------------------------------------------------------
+    # Model build: temporarily masquerade as `language_model` so the base
+    # class's `_build_module()` takes the HF AutoModelForCausalLM branch.
+    # ------------------------------------------------------------------
+
+    def _build_module(self):  # noqa: D401
+        original = self.model_config.model_type
+        try:
+            object.__setattr__(self.model_config, "model_type", self._BASE_MODEL_TYPE)
+            return super()._build_module()
+        finally:
+            object.__setattr__(self.model_config, "model_type", original)
 
     # ------------------------------------------------------------------
     # Inputs: pass codec_ids + response_mask + prompt_lens through to the

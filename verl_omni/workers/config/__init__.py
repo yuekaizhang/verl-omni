@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import diffusion
+from . import diffusion, multi_codebook_tts
 from .diffusion import *  # noqa: F401,F403
+from .multi_codebook_tts import *  # noqa: F401,F403
 
-__all__ = list(diffusion.__all__)
+__all__ = list(diffusion.__all__) + list(multi_codebook_tts.__all__)

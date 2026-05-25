@@ -34,18 +34,24 @@ def validate_multi_codebook_tts_recipe_config(config: DictConfig) -> None:
         MULTI_CODEBOOK_ADAPTER_REGISTRY,
     )
 
-    # 1. model.name must be registered.
-    model_name = _read(config, "actor_rollout_ref.model.name", default=None)
+    # 1. codec_adapter must be registered.
+    # The dispatch key moved off `model.name` (which collides with
+    # upstream's strict `HFModelConfig`) onto `actor.codec_adapter`
+    # (which lives on `MultiCodebookFSDPActorConfig`, our subclass).
+    model_name = _read(config, "actor_rollout_ref.actor.codec_adapter", default=None)
     if model_name is None:
-        # Fall back to a top-level `model.name` if the trainer YAML put it
-        # there instead of under actor_rollout_ref.
-        model_name = _read(config, "model.name", default=None)
+        # Back-compat fall-backs (older configs that may still set
+        # `model.name` or `model.codec_adapter`).
+        model_name = (
+            _read(config, "actor_rollout_ref.model.codec_adapter", default=None)
+            or _read(config, "actor_rollout_ref.model.name", default=None)
+            or _read(config, "model.name", default=None)
+        )
     if model_name is None:
         raise ValueError(
-            "multi_codebook_tts_grpo: `model.name` (or "
-            "`actor_rollout_ref.model.name`) is required but not set in the "
-            "trainer config. Choose one of the registered adapters: "
-            f"{sorted(MULTI_CODEBOOK_ADAPTER_REGISTRY.keys())}."
+            "multi_codebook_tts_grpo: `actor.codec_adapter` is required "
+            "but not set in the trainer config. Choose one of the "
+            f"registered adapters: {sorted(MULTI_CODEBOOK_ADAPTER_REGISTRY.keys())}."
         )
     # Trigger lazy registration of the named adapter so the check is honest.
     try:
