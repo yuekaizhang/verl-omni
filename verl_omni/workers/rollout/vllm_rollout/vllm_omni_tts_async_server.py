@@ -415,6 +415,52 @@ class vLLMOmniTTSHttpServer(vLLMOmniHttpServer):
                 "cardinality matches the pre-expanded batch."
             )
 
+        # Per-server async lock. verl's AgentLoopManager fans the per-row
+        # ``generate_tts`` coroutines via ``asyncio.gather`` and the rollout
+        # router can hand multiple concurrent rows to a single replica. When
+        # two rows hit the same vLLMOmniTTSHttpServer instance concurrently
+        # vllm-omni's orchestrator races: the second row's request_id never
+        # gets registered before the talker starts emitting tokens for it,
+        # and the orchestrator drops the output with::
+        #
+        #     [Orchestrator] Dropping output for unknown req <rowB>-s0 at
+        #     stage-0 (known reqs: ['<rowA>-s0'])
+        #
+        # which surfaces here as ``no stage-0 completions``. Serializing
+        # generate_tts per-server is the minimal verl-omni-side fix (we
+        # can't touch vllm-omni's orchestrator per the
+        # "no external verl/vllm-omni edits" constraint). Throughput is
+        # recovered at the cluster level by running multiple replicas; for
+        # a single-replica smoke this trades wall time for correctness.
+        lock = getattr(self, "_generate_tts_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._generate_tts_lock = lock
+
+        async with lock:
+            return await self._generate_tts_locked(
+                prompt_text=prompt_text,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                sampling_params=sampling_params,
+                request_id=request_id,
+                n=n,
+                task_type=task_type,
+                language=language,
+            )
+
+    async def _generate_tts_locked(
+        self,
+        prompt_text: str,
+        ref_audio: Any,
+        ref_text: str,
+        *,
+        sampling_params: dict[str, Any],
+        request_id: str | None,
+        n: int,
+        task_type: str,
+        language: str | None,
+    ) -> AudioRolloutOutput:
         request_id = request_id or uuid4().hex
         max_tokens = int(sampling_params.get("max_tokens", 4096))
 
